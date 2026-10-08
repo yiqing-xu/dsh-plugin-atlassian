@@ -1265,6 +1265,39 @@ const VIEWS = [
   },
 ] as const
 
+/** Jira's own "assigned to me" clause, resolved server-side against the token. */
+const MINE_CLAUSE = 'assignee = currentUser()'
+
+const MINE_PATTERN = /assignee\s*=\s*currentUser\s*\(\s*\)/i
+
+/**
+ * Fold the "assigned to me" constraint into a query.
+ *
+ * Server-side rather than a chip over the loaded page: the board fetches one
+ * bounded page, so filtering the 50 issues it happens to hold would report
+ * "nothing assigned to me" for a user whose work simply is not in that page.
+ * `currentUser()` is also the only correct way to ask — the panel never learns
+ * its own display name, and matching one would break on a rename.
+ *
+ * The clause goes BEFORE a trailing `ORDER BY`, because JQL requires the
+ * ordering to come last, and the fold is idempotent: a query that already pins
+ * the assignee — including one the user typed into the JQL box — is returned
+ * unchanged, so toggling the chip over a hand-written query cannot duplicate
+ * the condition.
+ */
+function withMine(jql: string, mine: boolean): string {
+  if (!mine) return jql
+  const trimmed = jql.trim()
+  if (MINE_PATTERN.test(trimmed)) return trimmed
+  if (trimmed === '') return MINE_CLAUSE
+  const order = /\border\s+by\b/i.exec(trimmed)
+  if (order === null) return `${trimmed} AND ${MINE_CLAUSE}`
+  const head = trimmed.slice(0, order.index).trimEnd()
+  const tail = trimmed.slice(order.index)
+  // A query that is nothing but an ORDER BY must not gain a leading `AND`.
+  return head === '' ? `${MINE_CLAUSE} ${tail}` : `${head} AND ${MINE_CLAUSE} ${tail}`
+}
+
 /** One filter choice, with the count that makes it worth clicking. */
 interface Choice {
   value: string
@@ -2160,6 +2193,8 @@ function JiraBoardPanel(): React.ReactElement {
   const [viewId, setViewId] = React.useState<string>(VIEWS[0].id)
   const [project, setProject] = React.useState('all')
   const [category, setCategory] = React.useState('all')
+  /** "Assigned to me": a SERVER-side constraint, not a client-side chip. */
+  const [mine, setMine] = React.useState(false)
   const [query, setQuery] = React.useState('')
   const [selected, setSelected] = React.useState<string | undefined>(undefined)
   /** Multi-selection, by issue key. Empty means "no selection mode". */
@@ -2199,7 +2234,7 @@ function JiraBoardPanel(): React.ReactElement {
   }, [status, configJql])
 
   const activeView = VIEWS.find((view) => view.id === viewId) ?? VIEWS[0]
-  const effectiveJql = override ?? activeView.jql
+  const effectiveJql = React.useMemo(() => withMine(override ?? activeView.jql, mine), [override, activeView, mine])
 
   React.useEffect(() => {
     if (!editingJql) setJqlDraft(effectiveJql)
@@ -2347,7 +2382,7 @@ function JiraBoardPanel(): React.ReactElement {
     [visible, checked],
   )
   const connected = status?.status === 'ready'
-  const filtering = project !== 'all' || category !== 'all' || query.trim() !== ''
+  const filtering = project !== 'all' || category !== 'all' || query.trim() !== '' || mine
 
   const toggleChecked = React.useCallback((key: string): void => {
     anchor.current = key
@@ -2461,7 +2496,7 @@ function JiraBoardPanel(): React.ReactElement {
         loading
           ? '读取中…'
           : filtering
-            ? '当前筛选下没有工单。放宽项目或状态，或清空搜索框。'
+            ? '当前筛选下没有工单。放宽项目、状态或经办人，或清空搜索框。'
             : '这个查询没有返回工单。换一个视图，或在 JQL 里放宽时间范围。',
       )
     }
@@ -2640,6 +2675,24 @@ function JiraBoardPanel(): React.ReactElement {
           }),
         ),
       ),
+      LI(
+        'div',
+        { key: 'assignee', style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+        LI('span', { key: 'label', style: { fontSize: '0.74em', color: C.textFaint, minWidth: 30 } }, '经办人'),
+        // No count, deliberately. This chip changes the JQL, so a truthful count
+        // would need a second round-trip to the server; a count taken from the
+        // loaded page would be exactly the number the chip already shows when
+        // active, and a wrong number in a filter chip is worse than none.
+        LI(FilterChip, {
+          key: 'mine',
+          active: mine,
+          label: '我',
+          title: `${MINE_CLAUSE} —— 只看指派给我的工单（服务端筛选）`,
+          onClick: () => {
+            setMine(!mine)
+          },
+        }),
+      ),
     ),
 
     // View, search, and the JQL box. The JQL is shown rather than hidden behind
@@ -2702,6 +2755,7 @@ function JiraBoardPanel(): React.ReactElement {
               onClick: () => {
                 setProject('all')
                 setCategory('all')
+                setMine(false)
                 setQuery('')
               },
             },
@@ -2732,8 +2786,15 @@ function JiraBoardPanel(): React.ReactElement {
         },
         onKeyDown: (event: React.KeyboardEvent) => {
           if (event.key !== 'Enter') return
-          setOverride(jqlDraft)
+          const text = jqlDraft
+          setOverride(text)
           setEditingJql(false)
+          // The chip has to mirror what was just committed. Once a hand-written
+          // query is the override, the clause inside it survives the chip being
+          // switched off — so a query that pins the assignee IS the "assigned to
+          // me" state, and one that does not must clear it. Without this the
+          // chip could read "off" while the board stayed filtered.
+          setMine(MINE_PATTERN.test(text))
         },
         style: {
           ...input,
@@ -3006,7 +3067,7 @@ function BoardPanelIcon({ active, size }: { active?: boolean; size?: number }): 
 // Client plugin
 // ---------------------------------------------------------------------------
 
-export { AtlassianSettings, JiraBoardPanel, BoardPanelIcon }
+export { AtlassianSettings, JiraBoardPanel, BoardPanelIcon, withMine }
 
 /** Client-plane plugin name, used by the browser runtime's diagnostics. */
 export const name = 'dsh-plugin-atlassian'

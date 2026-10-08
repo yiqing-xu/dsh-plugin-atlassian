@@ -84,6 +84,11 @@ connection, so it needs no extra token or cloudId configuration:
   to clear it, or use **Clear filters** to reset everything at once.
 - **Filter by status category.** The to do / in progress / done chips carry counts too, and combine
   with the project filter as AND.
+- **Assigned to me.** The **Assignee → Me** toggle folds `assignee = currentUser()` into the JQL, so
+  the server does the filtering — it does not sift the 50 issues already loaded. The board fetches one
+  page per refresh, so filtering that page would report "nothing assigned to me" to someone whose
+  work simply is not on it. The toggle carries no count on purpose: it changes the query, so a truthful
+  number would cost another round-trip, and a number derived from the loaded page would just be wrong.
 - **The search box** matches substrings in the key, the summary and the project name, entirely
   client-side, so it issues no requests.
 - **View switch.** "In progress" excludes completed issues (the default, so a long backlog cannot

@@ -72,6 +72,8 @@ await withChrome({ port: 9224 }, async (cdp) => {
       cards: cards.length,
       chipLabels: chips.map((c) => (c.textContent || '').replace(/\\s+/g, ' ').trim()),
       hasFilterLabels: text.includes('项目') && text.includes('状态'),
+      hasAssigneeRow: text.includes('经办人'),
+      hasMineChip: chips.some((c) => (c.textContent || '').trim() === '我'),
       hasSearch: !!document.querySelector('input[placeholder*="搜索"]'),
       hasJqlBox: jql !== null,
       text: text.slice(0, 1400),
@@ -81,6 +83,8 @@ await withChrome({ port: 9224 }, async (cdp) => {
   check('board rendered issue cards', panel.cards > 0, `cards=${String(panel.cards)}`)
   check('board text mentions connected site', /atlassian\.net|Jira/.test(panel.text), panel.text.slice(0, 120))
   check('project and status filter rows are present', panel.hasFilterLabels === true)
+  check('an assignee filter row is present', panel.hasAssigneeRow === true)
+  check('the "assigned to me" chip is present', panel.hasMineChip === true)
   check('search box is present', panel.hasSearch === true)
   check('JQL box shows the active query', panel.hasJqlBox === true)
   console.log(`       filter chips: ${panel.chipLabels.join(' | ')}`)
@@ -167,6 +171,66 @@ await withChrome({ port: 9224 }, async (cdp) => {
       cleared === true && restored === filterResult.total,
       `cleared=${String(cleared)} count=${String(restored)}`,
     )
+  }
+
+  // "Assigned to me": the one filter that is a SERVER-side constraint. The
+  // assertion is on the JQL box, because that is what proves the chip reaches
+  // the query instead of sifting the page the board happens to hold — and the
+  // clause must land BEFORE the trailing ORDER BY or Jira rejects the query.
+  console.log('\nassigned to me')
+  const mineOn = await cdp.evaluate(`(() => {
+    const chip = [...document.querySelectorAll('button[aria-pressed]')]
+      .find((b) => (b.textContent || '').trim() === '我')
+    if (!chip) return { found: false }
+    chip.click()
+    return { found: true }
+  })()`)
+  await sleep(3500)
+  const mineState = await cdp.evaluate(`(() => {
+    const box = [...document.querySelectorAll('input')]
+      .find((i) => (i.value || '').includes('updated >=') || (i.value || '').includes('currentUser'))
+    const chip = [...document.querySelectorAll('button[aria-pressed]')]
+      .find((b) => (b.textContent || '').trim() === '我')
+    return {
+      jql: box ? box.value : null,
+      pressed: chip ? chip.getAttribute('aria-pressed') : null,
+      cards: document.querySelectorAll('[data-dsh-jira-card]').length,
+    }
+  })()`)
+  if (mineOn.found !== true) {
+    check('the "assigned to me" chip is clickable', false, JSON.stringify(mineOn))
+  } else {
+    check('the chip turns itself on', mineState.pressed === 'true', String(mineState.pressed))
+    check(
+      'the JQL gains assignee = currentUser()',
+      typeof mineState.jql === 'string' && /assignee\\s*=\\s*currentUser\\(\\)/i.test(mineState.jql),
+      String(mineState.jql),
+    )
+    check(
+      'the clause lands before ORDER BY',
+      typeof mineState.jql === 'string' && !/ORDER BY[^]*assignee\\s*=/i.test(mineState.jql),
+      String(mineState.jql),
+    )
+    console.log(`       jql: ${String(mineState.jql)}`)
+    console.log(`       cards: ${String(mineState.cards)}`)
+
+    // Reversible — a filter that cannot be turned off is a trap.
+    await cdp.evaluate(`(() => {
+      const chip = [...document.querySelectorAll('button[aria-pressed]')]
+        .find((b) => (b.textContent || '').trim() === '我')
+      if (chip) chip.click()
+      return true
+    })()`)
+    await sleep(3500)
+    const mineOff = await cdp.evaluate(`(() => {
+      const box = [...document.querySelectorAll('input')]
+        .find((i) => (i.value || '').includes('updated >=') || (i.value || '').includes('currentUser'))
+      const chip = [...document.querySelectorAll('button[aria-pressed]')]
+        .find((b) => (b.textContent || '').trim() === '我')
+      return { jql: box ? box.value : null, pressed: chip ? chip.getAttribute('aria-pressed') : null }
+    })()`)
+    check('turning it off drops the clause again', !/currentUser/i.test(String(mineOff.jql)), String(mineOff.jql))
+    check('and the chip unpresses', mineOff.pressed === 'false', String(mineOff.pressed))
   }
 
   // Multi-select: shift-click extends from the anchor, and a selection bar with

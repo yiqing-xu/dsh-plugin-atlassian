@@ -182,5 +182,53 @@ check(
 // A dispatched issue must queue behind the current turn, never interrupt it.
 check('delivers with mode "queue", not "steer"', !/'steer'/.test(code))
 
+// ---------------------------------------------------------------------------
+// "Assigned to me" JQL folding
+// ---------------------------------------------------------------------------
+//
+// The chip is a SERVER-side constraint, so what it produces is the whole
+// feature: JQL puts ORDER BY last, and the fold must be idempotent so toggling
+// the chip over a query the user typed cannot duplicate the clause.
+
+console.log('\nwithMine()')
+const MINE = 'assignee = currentUser()'
+const fold = exports.withMine
+
+check('is exported', typeof fold === 'function')
+check('off leaves the query alone', fold('project = DEMO', false) === 'project = DEMO')
+if (typeof fold === 'function') {
+  check(
+    'appends to a query with no ordering',
+    fold('project = DEMO', true) === `project = DEMO AND ${MINE}`,
+    fold('project = DEMO', true),
+  )
+  check(
+    'inserts BEFORE the trailing ORDER BY',
+    fold('updated >= -180d ORDER BY updated DESC', true) === `updated >= -180d AND ${MINE} ORDER BY updated DESC`,
+    fold('updated >= -180d ORDER BY updated DESC', true),
+  )
+  check(
+    'keeps a lowercase order by last',
+    fold('project = DEMO order by created', true) === `project = DEMO AND ${MINE} order by created`,
+    fold('project = DEMO order by created', true),
+  )
+  check(
+    'handles a query that is only an ORDER BY',
+    fold('ORDER BY updated DESC', true) === `${MINE} ORDER BY updated DESC`,
+    fold('ORDER BY updated DESC', true),
+  )
+  check('turns an empty query into the clause', fold('', true) === MINE, fold('', true))
+  check('is idempotent on its own output', fold(fold('project = DEMO', true), true) === `project = DEMO AND ${MINE}`)
+  check(
+    'does not duplicate a case-variant clause the user typed',
+    fold('assignee=CURRENTUSER() AND project = DEMO', true) === 'assignee=CURRENTUSER() AND project = DEMO',
+    fold('assignee=CURRENTUSER() AND project = DEMO', true),
+  )
+  check(
+    'leaves an already-filtered query alone when toggled off',
+    fold(`project = DEMO AND ${MINE}`, false) === `project = DEMO AND ${MINE}`,
+  )
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)
