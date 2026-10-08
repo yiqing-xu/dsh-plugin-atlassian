@@ -127,7 +127,12 @@ node dev/verify-client-bundle.mjs  # lib/client.js：槽位注册契约与样式
 
 `verify-client-bundle.mjs` 用 `window.__ModuleLoader__` 和 `document` 的桩来物化 bundle，
 断言它注册了 `settings.section`、`sidebar.panellist`、`main`，并且**侧边栏 id 与 main 的 key
-一致**——这两个不一致时，图标会变成一个点不动的死按钮。
+一致**——这两个不一致时，图标会变成一个点不动的死按钮。它还断言**投递走的是 Session 对象**
+（`binding()` / `using()`），不是 scoped ctx 的 `remote`：`scope(id)` 拿到的是一个没声明
+`inject` 的空 fiber，Cordis 对这类 ctx 会拒绝对服务的**属性访问**
+（`cannot get property "remote" without inject`），而 `using()` 是 0.2.0 里
+"按需把没上场的会话物化出来"的唯一入口（0.1.x 的 `binding()` 自己会 `resolve()`，
+0.2.0 不会）。
 
 ## 浏览器里的真实渲染
 

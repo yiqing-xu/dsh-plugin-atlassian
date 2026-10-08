@@ -21,6 +21,12 @@ The DSH built-in `dsh-mcp-client` has no OAuth support, and API-token auth force
 `cloudId` on every tool call. This plugin supplies the missing piece over OAuth 2.1 — the site
 follows from the authorization, so no `cloudId` is ever passed.
 
+## Supported Harness versions
+
+The target runtime is **DeepSeek Harness 0.2.0-rc.2**. The plugin declares a peer range on
+`@deepseek-ai/dsh-tools` that spans 0.1.x and 0.2.x; DSH validates `@deepseek-ai/dsh-*` peers with
+`includePrerelease`, so the package installs on both lines.
+
 ## Install
 
 ```sh

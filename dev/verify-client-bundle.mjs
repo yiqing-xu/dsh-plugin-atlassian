@@ -159,5 +159,28 @@ for (const [label, entry] of [['settings', settings], ['panel', panel], ['main',
   check(`${label} is a component`, typeof entry?.component === 'function')
 }
 
+// ---------------------------------------------------------------------------
+// Prompt delivery contract
+// ---------------------------------------------------------------------------
+//
+// The hand-over path must reach a session through its Session object, never
+// through a scoped context: `scope(id)` returns a no-op fiber's ctx, and Cordis
+// gates service PROPERTY access on a context that declines `inject`
+// (`cannot get property "remote" without inject`). Comments legitimately name
+// that old access in prose, so strip them before matching code.
+
+const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+
+console.log('\nprompt delivery')
+check('does not read a scoped context\'s remote in code', !/scope\([^)]*\)\.remote/.test(code))
+check('reads the session through binding(), 0.2.0 and 0.1.x', /\.binding\?\.\(/.test(code))
+check('uses sessions.using() to materialize an unretained session', /\.using\(/.test(code))
+check(
+  "calls prompt(content, 'queue', undefined, requestId)",
+  /content,\s*'queue',\s*undefined,\s*requestId/.test(code),
+)
+// A dispatched issue must queue behind the current turn, never interrupt it.
+check('delivers with mode "queue", not "steer"', !/'steer'/.test(code))
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)

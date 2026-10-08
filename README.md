@@ -19,6 +19,12 @@ mcp__atlassian__searchConfluenceUsingCql
 DSH 自带的 `dsh-mcp-client` 不支持 OAuth；改用 API token 则每次工具调用都要显式传 `cloudId`。
 这个插件走 OAuth 2.1 补上这一段——站点由授权决定，不需要传 `cloudId`。
 
+## 兼容的 Harness 版本
+
+目标运行环境是 **DeepSeek Harness 0.2.0-rc.2**。插件对 `@deepseek-ai/dsh-tools` 声明了一个
+跨 0.1.x / 0.2.x 的 peer 区间；Harness 安装插件时会用 `includePrerelease` 校验 `@deepseek-ai/dsh-*`
+的 peer，所以在 0.1.x 与 0.2.0-rc.2 上都能装上。
+
 ## 安装
 
 ```sh

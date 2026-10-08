@@ -378,10 +378,37 @@ interface LayoutService {
 }
 
 interface SessionsService {
-  scope(id: string):
-    | { remote?: { session?: { prompt?: (request: Record<string, unknown>) => Promise<unknown> } } }
-    | undefined
+  /**
+   * The business Session behind one session id, or undefined when it is not
+   * currently materialized.
+   *
+   * This — not `scope(id).remote` — is how a prompt reaches a session. The
+   * scoped context is a no-op fiber with no `inject`, so Cordis's proxy rejects
+   * service *property* access on it (`cannot get property "remote" without
+   * inject`). The binding hands back the Session object itself, which is what
+   * the shipped composer delivers through.
+   */
+  binding?(id: string): { session?: SessionDelivery } | undefined
+  /**
+   * Retain a session for the duration of one operation, materializing it on
+   * demand. Absent on 0.1.x, where `binding()` itself materializes.
+   */
+  using?<T>(
+    target: string,
+    options: { source: string },
+    operation: (reference: { binding?: { session?: SessionDelivery } }) => Promise<T>,
+  ): Promise<T>
   open?(id: string): void
+}
+
+/** The Session face that admits one prompt. */
+interface SessionDelivery {
+  prompt?: (
+    content: readonly { type: 'text'; text: string }[],
+    mode: 'queue' | 'steer',
+    signal?: AbortSignal,
+    requestId?: string,
+  ) => Promise<unknown>
 }
 
 interface UiWorkspaceService {
@@ -398,7 +425,13 @@ interface WorkspacesService {
   }
 }
 
-/** One entry of the sessions-service list snapshot (the fields the UI reads). */
+/**
+ * One entry of the sessions-service list snapshot (the fields the UI reads).
+ *
+ * `retainedBy` and `current` are rivals rather than companions: 0.2.0 replaced
+ * the snapshot's single `current` id with per-row live retention counts. Both
+ * are optional here so this half runs on either harness.
+ */
 interface SessionSummary {
   id: string
   displayTitle: string
@@ -406,10 +439,37 @@ interface SessionSummary {
   blank?: boolean
   updatedAt?: number
   cwd?: string
+  /** Live retention counts per source; `mainView` is the session on stage. */
+  retainedBy?: { mainView?: number }
 }
 
 interface SessionsListService {
-  list: { getSnapshot(): { ids: readonly string[]; byId: Record<string, SessionSummary | undefined>; current?: string } }
+  list: {
+    getSnapshot(): {
+      ids: readonly string[]
+      byId: Record<string, SessionSummary | undefined>
+      /** Pre-0.2.0 single current-session id. */
+      current?: string
+    }
+  }
+}
+
+/**
+ * The session the shell currently shows in its main view.
+ *
+ * 0.2.0 dropped the list snapshot's `current` field; the live fact now rides the
+ * per-row retention counts, and `mainView > 0` is exactly what the shell itself
+ * reads to decide which session is on stage. `current` remains the answer on
+ * 0.1.x, where retention counts do not exist yet. Returning `undefined` keeps
+ * every caller on its existing "no current session" path.
+ */
+function currentSessionId(service: SessionsListService | undefined): string | undefined {
+  const snapshot = service?.list.getSnapshot()
+  if (snapshot === undefined) return undefined
+  return (
+    snapshot.current ??
+    Object.values(snapshot.byId).find((row) => (row?.retainedBy?.mainView ?? 0) > 0)?.id
+  )
 }
 
 /** A workspace plus the sessions it groups, for the hand-over menu. */
@@ -519,7 +579,7 @@ async function createHandoverSession(
 ): Promise<string | undefined> {
   if (uiWorkspace !== undefined && workspaces !== undefined) {
     const snapshot = workspaces.list.getSnapshot()
-    const current = sessionsList?.list.getSnapshot().current
+    const current = currentSessionId(sessionsList)
     const host =
       // An explicit workspace wins; otherwise the one owning the open session,
       // and only then the first registered one.
@@ -540,33 +600,62 @@ async function createHandoverSession(
   return undefined
 }
 
-/** Deliver one prompt to an existing session through its own scoped remote. */
+/**
+ * Deliver one prompt to an existing session.
+ *
+ * The Session object — not a scoped context — is the delivery channel. The
+ * scoped context is a no-op fiber that declares no `inject`, and Cordis gates
+ * service *property* access on such a context, so the previous
+ * `scope(id).remote.session` lookup could only ever throw. `binding()` returns
+ * the Session itself, which is what the shipped composer sends through.
+ *
+ * `using()` retains the session for the call, materializing a session that is
+ * not currently on stage; 0.2.0 dropped the on-demand materialization that
+ * `binding()` alone used to get from `resolve()`. Where `using()` is absent
+ * (0.1.x) the plain binding still covers the listed cases.
+ */
 async function deliverPrompt(
   sessions: SessionsService | undefined,
   sessionId: string,
   text: string,
 ): Promise<{ ok: boolean; error?: string }> {
   if (sessions === undefined) return { ok: false, error: '会话服务不可用' }
-  const scope = sessions.scope(sessionId)
-  const prompt = scope?.remote?.session?.prompt
-  if (prompt === undefined) return { ok: false, error: '拿不到这个会话的投递通道' }
+  const content = [{ type: 'text', text }] as const
   const requestId =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `${String(Date.now())}-${Math.random().toString(16).slice(2)}`
-  const result = (await prompt({
-    requestId,
-    sessionId,
-    // `queue` rather than `steer`: a dispatched issue must not interrupt a turn
-    // the user is already having.
-    mode: 'queue',
-    content: [{ type: 'text', text }],
-    clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  })) as { ok?: boolean; error?: { message?: string } } | undefined
-  if (result !== undefined && result.ok === false) {
-    return { ok: false, error: result.error?.message ?? '投递被拒绝' }
+
+  // The result is shaped `{ ok, value }` / `{ ok: false, error }`; a session
+  // face that ignores the contract resolves undefined and counts as delivered.
+  const interpret = (result: unknown): { ok: boolean; error?: string } => {
+    const record = typeof result === 'object' && result !== null ? (result as Record<string, unknown>) : undefined
+    if (record === undefined || record['ok'] !== false) return { ok: true }
+    const error = record['error']
+    const message =
+      typeof error === 'object' && error !== null && typeof (error as Record<string, unknown>)['message'] === 'string'
+        ? String((error as Record<string, unknown>)['message'])
+        : '投递被拒绝'
+    return { ok: false, error: message }
   }
-  return { ok: true }
+
+  /** Send through one binding, or report that it carries no session face. */
+  const send = async (binding: { session?: SessionDelivery } | undefined): Promise<{ ok: boolean; error?: string }> => {
+    const prompt = binding?.session?.prompt
+    if (prompt === undefined) return { ok: false, error: '拿不到这个会话的投递通道' }
+    return interpret(
+      await prompt.call(binding?.session, content, 'queue', undefined, requestId),
+    )
+  }
+
+  if (typeof sessions.using === 'function') {
+    try {
+      return await sessions.using(sessionId, { source: 'board-handover' }, (reference) => send(reference?.binding))
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  return await send(sessions.binding?.(sessionId))
 }
 
 /**
@@ -589,7 +678,7 @@ async function handOver(
   const subject = subjectOf(issues)
 
   if (target.kind === 'current-session') {
-    const current = services.sessionsList?.list.getSnapshot().current
+    const current = currentSessionId(services.sessionsList)
     if (current === undefined) return { ok: false, message: '当前没有打开的会话 —— 改用「新会话」' }
     const delivered = await deliverPrompt(services.sessions, current, text)
     return delivered.ok
