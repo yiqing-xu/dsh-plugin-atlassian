@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AtlassianBridge } from './bridge.js'
 import { createBoard, type JiraBoard } from './board.js'
 import { Config, type Config as ConfigShape } from './config.js'
+import { PreferenceStore, preferencesFileFor } from './prefs.js'
 import { registerRoutes, type BoardRouteOptions, type RequestFence, type RouteRegistrar } from './routes.js'
 import { SessionStore, sessionFileFor } from './store.js'
 
@@ -55,6 +56,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   const board = createBoard(bridge)
 
+  // UI preferences live beside the OAuth session but outlive it: disconnecting
+  // must not restore a hidden sidebar panel.
+  const prefs = new PreferenceStore(preferencesFileFor(config.serverName))
+
   // One object shared by the route handler (which enforces the defaults) and
   // the client registration (which labels its UI with them), so the two can
   // never disagree about which JQL or limit is in force.
@@ -63,6 +68,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     limit: config.board.limit,
     timeoutMs: config.board.timeoutMs,
     promptTemplate: config.board.promptTemplate,
+    sprintField: config.board.sprintField,
   }
 
   // Everything the bridge owns — the callback server, the transport, every
@@ -74,7 +80,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     'atlassian:bridge',
   )
 
-  bindRoutes(ctx, bridge, board, boardOptions)
+  bindRoutes(ctx, bridge, board, boardOptions, prefs)
 
   void bridge.start().catch((error: unknown) => {
     ctx.logger.error(`atlassian: startup failed: ${String(error)}`)
@@ -95,6 +101,7 @@ function bindRoutes(
   bridge: AtlassianBridge,
   board: JiraBoard,
   options: BoardRouteOptions,
+  prefs: PreferenceStore,
 ): void {
   const scope = ctx as unknown as ServiceScope
 
@@ -115,7 +122,7 @@ function bindRoutes(
 
       const wasFenced = fenced
       dispose?.()
-      dispose = registerRoutes(web, bridge, board, options, fence)
+      dispose = registerRoutes(web, bridge, board, options, prefs, fence)
       fenced = fence !== undefined
       if (!wasFenced || fenced) {
         ctx.logger.info(

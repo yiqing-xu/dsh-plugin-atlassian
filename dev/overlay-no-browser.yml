@@ -16,7 +16,9 @@
     # costs you a re-authorization in your real profile. A distinct name gives
     # this profile its own store file and makes that impossible.
     serverName: atlassian-dev
-    url: https://mcp.atlassian.com/v1/mcp
+    # v2 flat catalogue, same rationale as the shipped patch: the plugin
+    # registers every `tools/list` entry and the board calls raw names.
+    url: https://mcp.atlassian.com/v2/mcp?tools=all
     # Pinned, and deliberately NOT the production 3334. The dynamic client
     # registration binds this exact redirect URI, so a port that moves between
     # runs invalidates the registration and forces a fresh authorization — and

@@ -221,11 +221,15 @@ export interface AtlassianOAuthOptions {
  * live, what the redirect URI is, and how to get a human in front of the
  * authorization page.
  *
- * Note there is no `scope` in `clientMetadata`: Atlassian's authorization
- * server advertises no `scopes_supported`, and the MCP client is expected to
- * request the resource's scope (`WWW-Authenticate` or protected-resource
- * metadata, which this server does not publish). Asking for nothing lets the
- * server apply the site's own defaults.
+ * v2 points its protected-resource metadata at a per-resource authorization
+ * server (`auth.atlassian.com/<id>`) with its own DCR endpoint. The SDK follows
+ * that metadata, so a v1 registration is never reused — and because the session
+ * file is keyed by URL, the two endpoints cannot share one either.
+ *
+ * Note there is no `scope` in `clientMetadata`. v2 publishes `scopes_supported`
+ * in the protected-resource metadata, and the MCP SDK requests exactly that
+ * set; that is what lets the flat `?tools=all` catalogue load every product the
+ * user consented to. v1 published no scopes, so it requested none.
  */
 export class AtlassianOAuthProvider implements OAuthClientProvider {
   readonly #options: AtlassianOAuthOptions

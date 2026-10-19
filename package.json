@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-atlassian",
   "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: connect Atlassian (Jira, Confluence, JSM, Bitbucket) through the official remote MCP server using OAuth 2.1.",
+  "description": "DeepSeek Harness plugin: connect Atlassian (Jira, Confluence, Bitbucket, Goals, Projects) through the official v2 remote MCP server using OAuth 2.1.",
   "keywords": [
     "deepseek-harness",
     "dsh",

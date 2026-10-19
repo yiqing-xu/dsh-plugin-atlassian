@@ -5,19 +5,28 @@
 **中文** · [English](README.en.md)
 
 把 **Atlassian 官方远程 MCP 服务器**接入 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh)。
-一次浏览器授权后，Jira、Confluence、Jira Service Management、Bitbucket 与 Compass 的工具会作为
+一次浏览器授权后，Jira、Confluence、Bitbucket、Goals、Projects、Loom 等产品的工具会作为
 原生工具出现在 agent 的工具列表里：
 
 ```
 mcp__atlassian__getJiraIssue
 mcp__atlassian__createJiraIssue
-mcp__atlassian__searchConfluenceUsingCql
+mcp__atlassian__searchConfluence
 ```
 
 ![设置 → Atlassian](assets/settings-page.png)
 
 DSH 自带的 `dsh-mcp-client` 不支持 OAuth；改用 API token 则每次工具调用都要显式传 `cloudId`。
 这个插件走 OAuth 2.1 补上这一段——站点由授权决定，不需要传 `cloudId`。
+
+插件连的是 Atlassian MCP **v2**：`https://mcp.atlassian.com/v2/mcp?tools=all`。v2 默认只下发少量
+primary 工具加 `discover` / `executeRead` / `executeWrite` / `executeDestructive`；`?tools=all`
+是官方给「需要平铺工具列表的客户端」的入口。本插件按 `tools/list` 逐条桥接成原生工具，看板还会
+直接按工具名调用，所以默认就用这个平铺入口。
+
+v2 是**独立的 OAuth 资源**：授权服务器是 `auth.atlassian.com/<id>`，v1 的 client 注册和 token
+不能沿用。插件的授权文件按 URL 分文件保存，所以从 v1 升级后旧文件还在，但需要在设置页重新
+**连接 Atlassian** 一次。
 
 ## 兼容的 Harness 版本
 
@@ -49,11 +58,28 @@ dsh plugin --profile desktop add github:zhenyong97/dsh-plugin-atlassian
 2. 点 **连接 Atlassian**
 3. 在 Atlassian 授权页**选择要授权的站点**并批准
 4. 状态变为 **已连接**，设置页同时列出站点与可用工具数
+5. 点 **查看工具** 展开「工具清单」，可搜索并逐个查看工具名称和 Atlassian 提供的说明
+6. 之后随时可以点 **测试连接**，验证当前 token 是否仍然有效
 
 ![设置导航里的入口](assets/settings-nav.png)
 
-本页开头那张设置页就是连上之后的样子：站点那一行是你在授权时选中的站点，可用工具 32 个。授权页
-没有自动打开时，设置页会显示一条可点击的授权链接。卡住就点 **断开连接** 再重连一次。
+本页开头那张设置页就是连上之后的样子：站点那一行是你在授权时选中的站点，工具数随授权站点开通的
+产品而定。授权页没有自动打开时，设置页会显示一条可点击的授权链接。卡住就点 **断开连接** 再重连一次。
+
+「工具清单」按需加载，不会拖慢每几秒一次的状态轮询；展开后可以按工具名或说明搜索。列表里的名字就是
+agent 工具列表里的名字（`mcp__atlassian__...`），说明逐字来自 MCP 服务器，方便确认某个能力到底
+存在、服务端自己是怎么描述它的。
+
+页面下方的 **侧边栏入口** 开关控制侧边栏是否显示 Jira 图标。关掉后图标和它对应的看板面板一起
+撤下，看板数据与 agent 工具都不受影响，随时可以再打开。选择存在 profile 的
+`.dsh-atlassian/atlassian-prefs.json` 里，重启后仍然有效；**断开连接不会重置它**。
+
+**测试连接** 不是读本地记录的过期时间，而是沿着现有 MCP 连接真的发起一次带鉴权的只读调用（优先
+`getAccessibleAtlassianResources`，其次 `atlassianUserInfo`，都没有时退到 `tools/list`）。所以：
+
+- 访问令牌过期、refresh token 还有效 → SDK 自动换新令牌，页面显示 **Token 已自动刷新**
+- 两者都失效（401 / `invalid_grant`）→ 清掉本地 token、下线已注册的工具，并提示重新授权
+- 网络故障或 Atlassian 5xx → 只报 **无法验证**，不会误清授权
 
 连上之后，直接对 agent 说人话就行：
 
@@ -73,19 +99,52 @@ dsh plugin --profile desktop add github:zhenyong97/dsh-plugin-atlassian
 
 - **按状态分列**。Jira 的每个状态就是一列，按状态类别（待办 → 进行中 → 完成）排序；同一类别
   内按名称排，所以刷新不会跳列。
-- **按项目筛选**。项目芯片由当前查询实际返回的工单推导，每个都带数量——所以点下去不会落进空项目。
-  再点一次取消，或用「清除筛选」一次复位。
-- **按状态类别筛选**。待办 / 进行中 / 完成三个芯片同样带数量，与项目筛选是「与」的关系。
+- **项目行跟 Jira 侧边栏一样，只显示「最近 + 固定」**。站点上的项目动辄上百（这个站点是 148 个），
+  平铺就是一面墙。所以行里只放：
+  1. **固定项目**（你点圆点钉住的项目，按固定顺序）；
+  2. **最近打开过的项目**（你在这块看板上选过的，最新的在最前，最多记 8 个）；
+  3. **当前选中的项目**（哪怕它既没固定也不在最近里，也一定显示，因为刚选完就得能看见）。
+
+  其余全部收进行尾的 **「更多项目 · N」** 选择器：点开可按项目键或名称搜索，并按站点自己的
+  `lastIssueUpdateTime` 排序（最近有改动的在前），不用在一堆缩写里翻。项目**就是看板范围**，
+  始终只读一个，所以芯片后面的数字是这个项目真实的工单数；没有「全部」这个选项。
+  最近列表存在 profile 的 `.dsh-atlassian/atlassian-prefs.json` 里，重开页面仍在。
+- **固定项目**。每个项目芯片右侧有一个固定按钮（空心圆 → 实心圆）——点它把该项目**追加**到项目行
+  最前，多个项目按你点击的顺序依次排开，再点一次取消固定。固定只重排行、不隐藏、也不触发筛选。
+- **按冲刺筛选**。冲刺是项目里可枚举的**具名选项**（例如「镇海炼化冲刺15.5」），不是「有没有冲刺」。
+  冲刺行只有一个可搜索的具体冲刺选择器：它向服务端列出该项目所有面板上的冲刺（含已结束的——
+  RD003 一个项目就有 160 个），按「进行中 → 未开始 → 已结束（新的在前）」排序，支持输入名称收窄。
+  选中后写入 JQL（`sprint = <id>`）由服务端筛选，所以不在当前这一页的工单也能被正确筛出来；
+  芯片上的 × 或「清除筛选」可复原。
+- **按状态类别筛选**。待办 / 进行中 / 完成三个芯片同样带数量，与项目范围是「与」的关系。
 - **经办人是我**。「经办人 → 我」这个开关把 `assignee = currentUser()` 折进 JQL，由服务端筛选——
-  不是在前 50 条里挑。看板每次只抓一页，在前 50 条里过滤会把「没分给我」误报给一个工单根本不在
-  这一页的人。开关不带数量：它改的是查询，一个真实的数字要再问一次服务端，而从前 50 条算出来的
-  数字只会是错的。
-- **搜索框**在编号、标题、项目名里做子串匹配，纯客户端即时过滤，不产生请求。
+  不是在本页里挑。看板每次会把当前项目的匹配工单**翻页取全**（单页 100 条，直到服务端说没了为止），
+  所以「我」的数字和项目里有多少工单无关。开关不带数量：它改的是查询，一个真实的数字要再问一次
+  服务端。
+- **搜索框**在编号、标题、项目名里做子串匹配，纯客户端即时过滤，不产生请求。但看板只持有当前
+  项目的工单，
+  所以**输入 `HMHP-111` 这样的编号、或粘贴 Jira 链接后回车**，会改成按编号向服务端精确查找：
+  不在当前这一页、也不在当前筛选里的工单同样能打开，接着就能在抽屉里看详情或交给 agent。查到的
+  工单会临时作为一张卡片出现，不受项目/状态芯片影响；清空搜索框或按 `Esc` 即收起。
 - **视图切换**。「进行中」排除已完成工单（默认，避免长 backlog 把在办的埋掉），「全部」含已完成。
 - **JQL 直接显示并可编辑**，回车生效——JQL 就是看板的真实状态，藏起来会让"工单数不对"看起来像
   bug；改过之后会出现「重置」回到所选视图。
 - 卡片左侧的状态色条、底部的项目芯片，以及标题栏的总数 / 待办 / 进行中统计，都是一眼扫读用的。
-- 看板每 60 秒自己刷新一次，页面不可见时跳过；底部会提示是否已到每次抓取上限。
+- **跟随主题**：文字、边框、卡片底色与状态色都取自 Harness 的主题变量，深色模式下不会出现
+  「深底深字」；卡片悬停、滚动条和键盘焦点环也按当前主题绘制。
+- 看板每 60 秒自己刷新一次，页面不可见时跳过；「刷新」会连项目列表一起重读（新建的项目不用重开
+  页面就能选）。底部只在真的撞到安全上限时才提示。
+- **项目范围写进 JQL**：看板显示的那行 JQL 会带上 `project = <KEY>`。你手工改成 `project in (A, B)`
+  这类多项目查询时，项目芯片会停止声明某一个项目——查询才是真相。单项目形式（`project = A`）
+  会被芯片覆盖。
+- **打开不重新加载**。点进点出侧边栏图标、去一趟设置再回来，看到的是同一块看板：一分钟内的
+  数据直接复用，更旧的先原样显示、再在后台静默刷新，只有第一次打开才需要等。视图和筛选条件也
+  一起留着。**项目列表同样走缓存**——初始化读取一次后，一小时内重开面板不再请求 `/projects`，
+  不会闪「读取项目…」；过期后先显示旧列表再后台刷新。后台刷新失败只在标题栏标一个「同步失败」，不会把已经能读的看板换成报错页；断开
+  连接后缓存作废，回到「还没有连接」。
+- **点标题就刷新**。左上角「Jira 看板」那一整块是个按钮：点它立即重新读取看板（工具条里的
+  「刷新」是同一条路径），读取期间时间戳后面会出现「刷新中…」。所以「不再自动加载」不会让你
+  失去手动刷新的地方。
 
 ### 2. 看图单详情，确认状态流转
 
@@ -132,19 +191,20 @@ Jira 工单状态**——状态流转由你在看板上点确认。自定义模�
 
 ## 会用到哪些工具
 
-授权成功后，这些工具会以 `mcp__atlassian__<名称>` 出现在 agent 的工具列表里。实际可用的集合
-取决于你在授权站点里有权限访问的产品：
+授权成功后，`?tools=all` 平铺目录里的工具会以 `mcp__atlassian__<名称>` 出现在 agent 的工具列表
+里（Jira、Confluence、Bitbucket、Goals、Projects 等都会按 scope 加载，远不止下表这些）。
+实际可用的集合取决于你在授权站点里有权限访问的产品：
 
 | 工具 | 用途 |
 |---|---|
 | `searchJiraIssuesUsingJql` | 用 JQL 搜索工单 |
 | `getJiraIssue` | 读取单个工单 |
 | `createJiraIssue` | 新建工单 |
-| `getVisibleJiraProjects` | 列出可见的 Jira 项目 |
-| `getTransitionsForJiraIssue` | 查看某个工单可用的状态流转 |
-| `searchConfluenceUsingCql` | 用 CQL 搜索 Confluence |
-| `getConfluencePage` | 读取页面内容 |
-| `createConfluencePage` / `updateConfluencePage` | 新建 / 更新页面 |
+| `listJiraProjects` | 列出可见的 Jira 项目 |
+| `listJiraIssueTransitions` | 查看某个工单可用的状态流转 |
+| `searchConfluence` | 用 CQL 搜索 Confluence |
+| `getConfluenceContent` | 读取页面内容 |
+| `createConfluenceContent` / `updateConfluenceContent` | 新建 / 更新页面 |
 | `atlassianUserInfo` | 当前授权账号 |
 | `getAccessibleAtlassianResources` | 该授权可访问的站点 |
 
@@ -156,13 +216,20 @@ Jira 工单状态**——状态流转由你在看板上点确认。自定义模�
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `serverName` | `atlassian` | 工具名前缀：`mcp__<serverName>__<tool>` |
+| `url` | `https://mcp.atlassian.com/v2/mcp?tools=all` | MCP v2 平铺工具入口；`?tools=all` 去掉后只剩 primary 工具 |
 | `redirectPort` | `3334` | OAuth 回调端口，尽量保持不变 |
 | `expectedSite` | 空 | 填了会在授权后校验站点，不一致时提示 |
 | `autoOpenBrowser` | `true` | 点「连接 Atlassian」时自动打开浏览器 |
 | `board.jql` | 空 | 看板打开的默认 JQL，留空用内置的「进行中」视图（排除已完成） |
-| `board.limit` | `50` | 每次刷新的工单数上限（服务端单页最多 100） |
+| `board.limit` | `5000` | **安全上限**，不是每页条数：看板会按 100 条一页把当前项目的匹配工单翻页取全，只有撞到这个上限才停，并在底部提示 |
 | `board.timeoutMs` | `90000` | 单次看板读取的超时 |
 | `board.promptTemplate` | 空 | 交付给 agent 的指令模板，留空用内置模板 |
+| `board.sprintField` | 空 | 冲刺字段的 `customfield_*` id，留空自动探测（见下） |
+
+> **冲刺字段**：Atlassian v2 只在你按 `customfield_*` **id** 请求时才返回自定义字段，按名字请求 `sprint`
+> 会被静默丢弃——这正是「冲刺芯片全空」的根因。留空时插件先问 `getJiraIssueTypeMetaWithFields`，取
+> 名字含「冲刺/Sprint」且类型为数组对象的那一个；问不到才退回约定值 `customfield_10020`。站点改过字段
+> 或有多套冲刺字段时，在这里钉死 id。
 
 其余字段与完整默认值见 `cordis.patch.yml`。
 
@@ -189,7 +256,23 @@ dsh plugin --profile desktop remove dsh-plugin-atlassian
 <summary>状态停在「需要授权」/ 浏览器没打开</summary>
 
 点设置页里的授权链接直接访问。若 `redirectPort` 被占用，插件会自动退回临时端口并重新注册。
-流程彻底卡住时点 **断开连接** 清掉 token 再重连。
+流程彻底卡住时点 **断开连接** 清掉 token 再重连。若授权页明确提示 redirect 不允许，需要站点管理员
+在 Atlassian 的域设置里放行 `http://127.0.0.1:<redirectPort>/callback`（v2 可能启用 redirect
+allowlist）。
+</details>
+
+<details>
+<summary>从 v1 升级后停在「需要授权」</summary>
+
+v2 是独立的 OAuth 资源，v1 的 client 注册和 token 不能沿用。插件按 URL 分文件保存授权，旧文件
+不会被覆盖；在设置页点一次 **连接 Atlassian** 重新授权即可。
+</details>
+
+<details>
+<summary>怎么确认 token 还有没有效</summary>
+
+点 **测试连接**。它做一次真实的带鉴权调用，而不是读本地过期时间；只有服务端明确拒绝
+（401 / `invalid_grant`）才会清掉授权并要求重连，网络故障或 5xx 只报「无法验证」。
 </details>
 
 <details>
@@ -211,6 +294,9 @@ dsh plugin --profile desktop remove dsh-plugin-atlassian
 - 图片结果渲染为占位文本
 - 设置页的导航图标是就地补丁（DSH 没提供图标接口），匹配不上时保持默认齿轮
 - 未对 `expectedSite` 不匹配做硬阻断
+- 走 `?tools=all` 平铺目录，没有使用 v2 的 `discover` / `execute*` 延迟发现模式；因此授权同意页会
+  按资源公布的 scope 全量申请，工具列表也随授权站点开通的产品变长
+- JSM 工具在 v2 里只支持 API token 认证，本插件只走 OAuth，所以不会加载 JSM 工具
 
 ## 开发
 
@@ -218,7 +304,7 @@ dsh plugin --profile desktop remove dsh-plugin-atlassian
 npm install && npm run build   # tsc(host) + tsc(client) + 打包 client bundle
 ```
 
-在独立 profile 上验证、两个回归脚本，以及 README / 市场截图的抓取流程，见 `dev/README.md`。
+在独立 profile 上验证、四个回归脚本，以及 README / 市场截图的抓取流程，见 `dev/README.md`。
 
 ## License
 

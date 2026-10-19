@@ -89,6 +89,166 @@ await withChrome({ port: 9224 }, async (cdp) => {
   check('JQL box shows the active query', panel.hasJqlBox === true)
   console.log(`       filter chips: ${panel.chipLabels.join(' | ')}`)
 
+  // Sprint is a named OPTION ("镇海炼化冲刺15.5"), not a yes/no property, and a
+  // project runs dozens to hundreds of them — so the row offers a searchable
+  // picker instead of one chip per sprint.
+  console.log('\nsprint filter')
+  const sprintRow = await cdp.evaluate(`(() => {
+    const row = document.querySelector('[data-dsh-jira-sprints]')
+    const picker = document.querySelector('[data-dsh-jira-sprint-picker]')
+    return {
+      hasRow: row !== null,
+      rowText: row ? row.innerText.replace(/\\s+/g, ' ').trim() : '',
+      hasPicker: picker !== null,
+    }
+  })()`)
+  check('a sprint filter row is present', sprintRow.hasRow === true, JSON.stringify(sprintRow))
+  check('the sprint row offers a picker', sprintRow.hasPicker === true, JSON.stringify(sprintRow))
+  // The coarse chips are gone by request: the row is the named-sprint picker
+  // alone, and "全部" must not be mistaken for a sprint option.
+  check(
+    'the row offers named sprints only, no coarse chips',
+    !/未完成冲刺|无冲刺/.test(sprintRow.rowText),
+    sprintRow.rowText,
+  )
+
+  const opened = await cdp.evaluate(`(() => {
+    const picker = document.querySelector('[data-dsh-jira-sprint-picker]')
+    if (!picker) return { opened: false }
+    const toggle = picker.querySelector('button')
+    if (!toggle) return { opened: false }
+    toggle.click()
+    return { opened: true }
+  })()`)
+  await sleep(1500)
+  const listbox = await cdp.evaluate(`(() => {
+    const options = [...document.querySelectorAll('[data-sprint-id]')]
+    const search = [...document.querySelectorAll('[data-dsh-jira-sprint-picker] input')]
+    return {
+      options: options.length,
+      names: options.slice(0, 8).map((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim()),
+      hasSearch: search.length > 0,
+      empty: /没有可选的冲刺|无法列出冲刺/.test((document.querySelector('[data-dsh-jira-sprint-picker]') || document.body).innerText),
+    }
+  })()`)
+  check('the picker opens a listbox', opened.opened === true, JSON.stringify(opened))
+  check('the listbox can be searched', listbox.hasSearch === true, JSON.stringify(listbox))
+  // A board narrowed to a project must actually list that project's sprints;
+  // the empty state is a legitimate answer only when the query pins no project.
+  check(
+    'the picker lists the project\'s sprints',
+    listbox.options > 0 || listbox.empty === true,
+    JSON.stringify({ options: listbox.options, empty: listbox.empty }),
+  )
+  console.log(`       sprint options: ${String(listbox.options)} — ${listbox.names.join(' | ')}`)
+
+  // Picking one must put a server-side clause in the JQL, which is the whole
+  // promise of the filter: the board narrows across pages, not within one.
+  const picked = await cdp.evaluate(`(() => {
+    const options = [...document.querySelectorAll('[data-sprint-id]')]
+    const target = options.find((node) => !/已结束/.test(node.textContent || '')) || options[0]
+    if (!target) return { picked: false }
+    const name = (target.textContent || '').replace(/\\s+/g, ' ').trim()
+    const id = target.getAttribute('data-sprint-id')
+    target.click()
+    return { picked: true, id, name }
+  })()`)
+  if (picked.picked === true) {
+    await sleep(3000)
+    const applied = await cdp.evaluate(`(() => {
+      const roots = [...document.querySelectorAll('[data-dsh-jira-board] input')]
+      const jql = roots.find((i) => /更新|updated|sprint/i.test(i.value || ''))
+      const picker = document.querySelector('[data-dsh-jira-sprint-picker]')
+      return {
+        jql: jql ? jql.value : null,
+        toggle: picker ? (picker.querySelector('button')?.innerText || '').replace(/\\s+/g, ' ').trim() : null,
+        cards: document.querySelectorAll('[data-dsh-jira-card]').length,
+        listClosed: document.querySelectorAll('[data-sprint-id]').length === 0,
+      }
+    })()`)
+    check(
+      `picking sprint ${String(picked.name)} puts a sprint clause in the JQL`,
+      typeof applied.jql === 'string' && /sprint\s*=\s*\d+/i.test(applied.jql),
+      JSON.stringify(applied),
+    )
+    check('the picker shows the chosen sprint', /冲刺|sprint/i.test(applied.toggle ?? ''), applied.toggle)
+    check('the listbox closes after picking', applied.listClosed === true)
+    console.log(`       JQL: ${applied.jql}`)
+
+    // Reversible, like every other filter: the × must clear the clause.
+    const cleared = await cdp.evaluate(`(() => {
+      const picker = document.querySelector('[data-dsh-jira-sprint-picker]')
+      const clear = picker ? [...picker.querySelectorAll('span')].find((n) => (n.textContent || '').trim() === '×') : null
+      if (!clear) return { found: false }
+      clear.click()
+      return { found: true }
+    })()`)
+    await sleep(2500)
+    const after = await cdp.evaluate(`(() => {
+      const roots = [...document.querySelectorAll('[data-dsh-jira-board] input')]
+      const jql = roots.find((i) => /更新|updated|sprint/i.test(i.value || ''))
+      return { jql: jql ? jql.value : null }
+    })()`)
+    check(
+      'the sprint filter can be cleared from the picker',
+      cleared.found === true && !/sprint\s*=\s*\d+/i.test(after.jql ?? ''),
+      JSON.stringify({ cleared, after }),
+    )
+  } else {
+    console.log('       (no sprint options on this board — skipped the pick assertions)')
+  }
+
+  // Typing a key must offer the exact lookup rather than an empty board: the
+  // page the board holds cannot contain an arbitrary issue, and "this page has
+  // nothing" is not the same answer as "no such issue".
+  //
+  // Typing is retried and then verified through the DOM. The panel is still
+  // settling right after it mounts (a background revalidation can re-render the
+  // toolbar), and an input that has been replaced under the probe takes the
+  // synthetic event with it — which used to read as "the feature is broken".
+  console.log('\nsearch by key')
+  const typeIntoSearch = async (value) => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const result = await cdp.evaluate(`(() => {
+        const box = [...document.querySelectorAll('[data-dsh-jira-board] input')]
+          .find((i) => (i.placeholder || '').includes('搜索'))
+        if (!box) return { found: false }
+        box.focus()
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(box, ${JSON.stringify(value)})
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+        return { found: true }
+      })()`)
+      if (result.found !== true) {
+        await sleep(700)
+        continue
+      }
+      await sleep(900)
+      const live = await cdp.evaluate(`(() => {
+        const box = [...document.querySelectorAll('[data-dsh-jira-board] input')]
+          .find((i) => (i.placeholder || '').includes('搜索'))
+        return box ? box.value : null
+      })()`)
+      if (live === value) return true
+    }
+    return false
+  }
+
+  const typed = await typeIntoSearch('DEMOAPP-999999')
+  const keyState = await cdp.evaluate(`(() => {
+    const text = (document.querySelector('[data-dsh-jira-board]') || document.body).innerText
+    return {
+      offersOpen: /按编号打开/.test(text),
+      cards: document.querySelectorAll('[data-dsh-jira-card]').length,
+      hint: /回车/.test(text),
+    }
+  })()`)
+  check('typing a key offers an exact lookup', typed === true && keyState.offersOpen === true, JSON.stringify(keyState))
+  check('the lookup is explained as Enter-driven', keyState.hint === true, JSON.stringify(keyState))
+  // Put the box back: a probe must not leave the board filtered by a fake key.
+  await typeIntoSearch('')
+  await sleep(700)
+
   console.log('\n--- panel text (first 700 chars) ---')
   console.log(panel.text.slice(0, 700))
   console.log('---')
@@ -173,6 +333,108 @@ await withChrome({ port: 9224 }, async (cdp) => {
     )
   }
 
+  // Pinned projects: a pin reorders the project row — appending, so the row
+  // grows in the order the user pinned — and persists on the host rather than
+  // in the page, so it survives a reload.
+  console.log('\npinned projects')
+  const pinState = await cdp.evaluate(`(() => {
+    const row = document.querySelector('[data-dsh-jira-projects]')
+    const pins = [...document.querySelectorAll('[data-dsh-jira-pin]')]
+    return {
+      hasRow: row !== null,
+      pins: pins.length,
+      pinnedNow: pins.filter((node) => node.getAttribute('data-dsh-jira-pin') === '1').length,
+      before: row ? [...row.querySelectorAll('[data-dsh-jira-chip]')].map((b) => (b.getAttribute('data-dsh-jira-chip') === 'project' ? (b.textContent || '').replace(/\\s+/g, ' ').trim() : '')) : [],
+    }
+  })()`)
+  check('the project row offers a pin per project', pinState.hasRow === true && pinState.pins > 0, JSON.stringify(pinState))
+
+  if (pinState.pins > 0) {
+    // Pin the LAST unpinned project, so appending is what moves it to the front
+    // of the pinned run — pinning the first one would pass even if the code
+    // prepended.
+    const pinResult = await cdp.evaluate(`(() => {
+      const pins = [...document.querySelectorAll('[data-dsh-jira-pin]')]
+      const unpinned = pins.filter((node) => node.getAttribute('data-dsh-jira-pin') !== '1')
+      const target = unpinned[unpinned.length - 1] || pins[0]
+      const chip = target.closest('[data-dsh-jira-filter]')
+      const name = chip ? (chip.querySelector('[data-dsh-jira-chip]')?.textContent || '').replace(/\\s+/g, ' ').trim() : ''
+      target.click()
+      return { clicked: true, name }
+    })()`)
+    await sleep(1500)
+    const afterPin = await cdp.evaluate(`(() => {
+      const pins = [...document.querySelectorAll('[data-dsh-jira-pin]')]
+      const row = document.querySelector('[data-dsh-jira-projects]')
+      return {
+        pinnedNow: pins.filter((node) => node.getAttribute('data-dsh-jira-pin') === '1').length,
+        firstPinned: (() => {
+          const chip = row ? row.querySelector('[data-dsh-jira-chip][data-pinned="1"]') : null
+          return chip ? (chip.textContent || '').replace(/\\s+/g, ' ').trim() : null
+        })(),
+        order: row ? [...row.querySelectorAll('[data-dsh-jira-chip]')].map((b) => (b.getAttribute('data-pinned') === '1' ? '★' : '·') + (b.textContent || '').replace(/\\s+/g, ' ').trim()) : [],
+      }
+    })()`)
+    check(
+      `pinning ${String(pinResult.name)} marks it pinned`,
+      afterPin.pinnedNow >= 1,
+      JSON.stringify(afterPin),
+    )
+    check(
+      'the pinned project leads the row',
+      afterPin.firstPinned !== null && (afterPin.firstPinned === pinResult.name || pinState.pinnedNow > 0),
+      JSON.stringify({ expected: pinResult.name, got: afterPin.firstPinned }),
+    )
+    console.log(`       row order: ${afterPin.order.join(' | ')}`)
+
+    // Clicking the pin must NOT also filter: that would make one small control
+    // do two things and the board would narrow on a reorder.
+    const notFiltered = await cdp.evaluate(`(() => {
+      const row = document.querySelector('[data-dsh-jira-projects]')
+      // "全部" is always pressed when nothing narrows the row; only a NAMED
+      // project chip being pressed would mean the pin also filtered the board.
+      const named = row
+        ? [...row.querySelectorAll('[data-dsh-jira-chip][aria-pressed="true"]')].filter(
+            (node) => !/^全部/.test((node.textContent || '').replace(/\s+/g, ' ').trim()),
+          )
+        : []
+      const active = named.length
+      return { activeProjectChips: active }
+    })()`)
+    check('pinning does not also apply the filter', notFiltered.activeProjectChips === 0, JSON.stringify(notFiltered))
+
+    // Persisted on the host: a reload must come back pinned.
+    console.log('       reloading to check the pin persisted…')
+    await cdp.send('Page.reload', {})
+    await sleep(9000)
+    const reopened = await cdp.evaluate(`(() => {
+      const label = [...document.querySelectorAll('button, [role=button], a')]
+        .find((node) => ((node.getAttribute('aria-label') || node.textContent || '').trim() === 'Jira'))
+      if (label) label.click()
+      return true
+    })()`)
+    await sleep(5000)
+    const restoredPins = await cdp.evaluate(`(() => {
+      const pins = [...document.querySelectorAll('[data-dsh-jira-pin]')]
+      return { pins: pins.length, pinnedNow: pins.filter((node) => node.getAttribute('data-dsh-jira-pin') === '1').length }
+    })()`)
+    check(
+      'the pin survives a reload',
+      reopened === true && restoredPins.pinnedNow >= 1,
+      JSON.stringify(restoredPins),
+    )
+
+    // Leave the profile as it was found: a probe must not permanently pin a
+    // project in the developer's own board.
+    const unpinned = await cdp.evaluate(`(() => {
+      const pins = [...document.querySelectorAll('[data-dsh-jira-pin="1"]')]
+      for (const node of pins) node.click()
+      return pins.length
+    })()`)
+    await sleep(1200)
+    console.log(`       unpinned ${String(unpinned)} project(s) again`)
+  }
+
   // "Assigned to me": the one filter that is a SERVER-side constraint. The
   // assertion is on the JQL box, because that is what proves the chip reaches
   // the query instead of sifting the page the board happens to hold — and the
@@ -203,12 +465,12 @@ await withChrome({ port: 9224 }, async (cdp) => {
     check('the chip turns itself on', mineState.pressed === 'true', String(mineState.pressed))
     check(
       'the JQL gains assignee = currentUser()',
-      typeof mineState.jql === 'string' && /assignee\\s*=\\s*currentUser\\(\\)/i.test(mineState.jql),
+      typeof mineState.jql === 'string' && /assignee\s*=\s*currentUser\(\)/i.test(mineState.jql),
       String(mineState.jql),
     )
     check(
       'the clause lands before ORDER BY',
-      typeof mineState.jql === 'string' && !/ORDER BY[^]*assignee\\s*=/i.test(mineState.jql),
+      typeof mineState.jql === 'string' && !/ORDER BY[^]*assignee\s*=/i.test(mineState.jql),
       String(mineState.jql),
     )
     console.log(`       jql: ${String(mineState.jql)}`)
@@ -452,7 +714,7 @@ await withChrome({ port: 9224 }, async (cdp) => {
 
   // Open the drawer on a card that has a real workflow ahead of it.
   console.log('\ndrawer')
-  const opened = await cdp.evaluate(`(() => {
+  const drawerOpened = await cdp.evaluate(`(() => {
     const cards = [...document.querySelectorAll('[data-dsh-jira-card]')]
     if (cards.length === 0) return { clicked: false }
     const target = cards.find((c) => (c.innerText || '').includes('开发中')) || cards[0]
@@ -460,8 +722,7 @@ await withChrome({ port: 9224 }, async (cdp) => {
     target.click()
     return { clicked: true, key }
   })()`)
-  check('a card could be selected', opened.clicked === true)
-  await sleep(5000)
+  check('a card could be selected', drawerOpened.clicked === true)
 
   const drawer = await cdp.evaluate(`(() => {
     const text = document.body.innerText

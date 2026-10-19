@@ -11,8 +11,8 @@ import { spawn } from 'node:child_process'
  * commands:
  *
  * ```
- * in : https://mcp.atlassian.com/v1/authorize?response_type=code&client_id=ABC&state=XYZ
- * out: https://mcp.atlassian.com/v1/authorize?response_type=code
+ * in : https://auth.example.com/authorize?response_type=code&client_id=ABC&state=XYZ
+ * out: https://auth.example.com/authorize?response_type=code
  *      'client_id' is not recognized as an internal or external command
  * ```
  *

@@ -37,33 +37,65 @@ const LI = React.createElement
 // ---------------------------------------------------------------------------
 
 /**
- * Visual values are expressed as shell CSS variables with a literal fallback,
- * so the panel reads correctly in light and dark without shipping a palette of
- * its own and without depending on a token that may not exist yet at first
- * paint.
+ * A shell design token, with a legacy name and a literal fallback.
+ *
+ * The theme package defines its palette as `--dsw-alias-*` on `body`, and swaps
+ * the whole set under the dark-theme attribute. Those aliases are what make one
+ * stylesheet readable on both surfaces; a literal alone is a light-theme colour
+ * and turns unreadable the moment the shell goes dark.
+ *
+ * The older `--text` / `--surface` names are kept inside the fallback chain in
+ * case a host still exposes them, and the literal is the last resort for a shell
+ * that defines neither — nothing better can be assumed at that point.
  */
-function tok(name: string, fallback: string): string {
-  return `var(--${name}, ${fallback})`
+function alias(name: string, legacy: string, fallback: string): string {
+  return `var(--dsw-alias-${name}, var(--${legacy}, ${fallback}))`
 }
 
+/**
+ * A semantic accent that keeps its hue but follows the surrounding text colour.
+ *
+ * `currentColor` is the inherited text colour, so the mix darkens a status colour
+ * on a light background and lightens it on a dark one. That is one declaration
+ * with no theme detection and no second palette to keep in sync; a browser that
+ * cannot parse `color-mix` simply falls back to inherited colour.
+ */
+function tone(base: string, weight = 82): string {
+  return `color-mix(in srgb, ${base} ${String(weight)}%, currentColor)`
+}
+
+const ACCENT = alias('link', 'accent', '#2f6fed')
+
 const C = {
-  text: tok('text', '#1f2328'),
-  textDim: tok('text-secondary', 'rgba(127,127,127,.95)'),
-  textFaint: tok('text-tertiary', 'rgba(127,127,127,.72)'),
-  border: tok('border', 'rgba(127,127,127,.28)'),
-  borderSoft: tok('border-subtle', 'rgba(127,127,127,.18)'),
-  surface: tok('surface', '#ffffff'),
-  surfaceSoft: tok('surface-subtle', 'rgba(127,127,127,.06)'),
-  surfaceHover: tok('surface-hover', 'rgba(127,127,127,.10)'),
-  accent: tok('accent', '#2f6fed'),
-  accentSoft: tok('accent-subtle', 'rgba(47,111,237,.12)'),
+  text: alias('label-primary', 'text', '#1f2328'),
+  textDim: alias('label-secondary', 'text-secondary', '#61666b'),
+  textFaint: alias('label-tertiary', 'text-tertiary', '#81858c'),
+  border: alias('border-l3', 'border', 'rgba(127,127,127,.28)'),
+  borderSoft: alias('border-l2', 'border-subtle', 'rgba(127,127,127,.18)'),
+  /** The panel's own background, for anything that must cover scrolled content. */
+  surface: alias('bg-base', 'surface', '#ffffff'),
+  /** A floating menu: the shell's translucent raised layer. */
+  menu: `var(--dsw-specific-menu, ${alias('bg-layer-3', 'surface', '#ffffff')})`,
+  /**
+   * A picker's floating list, OPAQUE.
+   *
+   * `menu` is the shell's own translucent raised layer — fine for a menu that
+   * floats over quiet chrome, but a picker opens directly over a wall of issue
+   * cards, and the cards showed through as unreadable ghost text. The panel
+   * surface is a solid token, so it is what the list must sit on.
+   */
+  pickerList: alias('bg-base', 'surface', '#ffffff'),
+  surfaceSoft: 'var(--surface-subtle, rgba(127,127,127,.08))',
+  surfaceHover: alias('interactive-bg-hover', 'surface-hover', 'rgba(127,127,127,.12)'),
+  accent: ACCENT,
+  accentSoft: `color-mix(in srgb, ${ACCENT} 14%, transparent)`,
 } as const
 
 const TONE_COLOR: Record<string, string> = {
-  neutral: 'rgba(127,127,127,.9)',
-  pending: '#c98a00',
-  ok: '#1a9e5c',
-  bad: '#d64545',
+  neutral: alias('label-tertiary', 'text-tertiary', '#81858c'),
+  pending: tone('#c98a00'),
+  ok: tone('#1a9e5c'),
+  bad: tone('#d64545'),
 }
 
 const box: React.CSSProperties = {
@@ -120,13 +152,27 @@ if (typeof document !== 'undefined') {
   tag.textContent = `
 [data-dsh-jira-board] { color: ${C.text}; }
 [data-dsh-jira-board] *, [data-dsh-jira-board] *::before, [data-dsh-jira-board] *::after { box-sizing: border-box; }
+[data-dsh-jira-board] :focus-visible { outline: 2px solid ${C.accent}; outline-offset: 2px; border-radius: 6px; }
 [data-dsh-jira-card] { transition: border-color .12s ease, background-color .12s ease; }
 [data-dsh-jira-card]:hover { border-color: ${C.accent} !important; }
+[data-dsh-jira-card][data-checked="0"]:hover { background: ${C.surfaceHover} !important; }
 [data-dsh-jira-card][data-dragging="1"] { opacity: .45; }
-[data-dsh-jira-cols] { scrollbar-width: thin; }
+[data-dsh-jira-board] button[aria-pressed="false"]:hover { background-color: ${C.surfaceHover} !important; }
+[data-dsh-jira-board] button:not([aria-pressed]):hover:not(:disabled) { background-color: ${C.surfaceHover} !important; }
+/* The pin sits inside a chip, so neither half may repaint the pill it lives in:
+   a hover fill on the pin alone is the only affordance, and a pinned chip keeps
+   its accent border while hovered. */
+[data-dsh-jira-filter] { transition: border-color .12s ease; }
+[data-dsh-jira-filter] > button { border-radius: 0 !important; }
+[data-dsh-jira-pin]:hover { opacity: 1 !important; }
+[data-dsh-jira-chip][data-pinned="1"]:hover { background-color: transparent !important; }
+[data-dsh-jira-cols] { scrollbar-width: thin; scrollbar-color: ${C.border} transparent; }
 [data-dsh-jira-cols]::-webkit-scrollbar { height: 8px; }
 [data-dsh-jira-cols]::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 999px; }
-[data-dsh-jira-drop="1"] { outline: 2px dashed ${C.accent} !important; outline-offset: 1px; }
+[data-dsh-jira-cards] { scrollbar-width: thin; scrollbar-color: ${C.border} transparent; }
+[data-dsh-jira-cards]::-webkit-scrollbar { width: 8px; }
+[data-dsh-jira-cards]::-webkit-scrollbar-thumb { background: ${C.borderSoft}; border-radius: 999px; }
+[data-dsh-jira-drop="1"] { outline: 2px dashed ${C.accent} !important; outline-offset: 1px; border-radius: 6px; }
 [data-dsh-jira-md] > *:first-child { margin-top: 0; }
 [data-dsh-jira-md] > *:last-child { margin-bottom: 0; }
 [data-dsh-jira-md] a { text-decoration: underline; }
@@ -151,11 +197,70 @@ interface StatusPayload {
   board: { jql: string; limit: number; promptTemplate: string }
 }
 
+type ConnectionTestVerdict =
+  | 'valid'
+  | 'refreshed'
+  | 'invalid'
+  | 'degraded'
+  | 'unknown'
+  | 'not-connected'
+
+/** Mirrors `ConnectionTest` in `src/bridge.ts`. */
+interface ConnectionTest {
+  ok: boolean
+  verdict: ConnectionTestVerdict
+  checkedAt: string
+  durationMs: number
+  tool?: string
+  site?: string
+  message: string
+}
+
+/** Mirrors `BridgedTool` in `src/bridge.ts`. */
+interface BridgedTool {
+  name: string
+  rawName: string
+  description: string
+}
+
+const TEST_LABEL: Record<ConnectionTestVerdict, string> = {
+  valid: 'Token 有效',
+  refreshed: 'Token 已自动刷新',
+  invalid: 'Token 已失效',
+  degraded: '授权有效，但探测失败',
+  unknown: '无法验证',
+  'not-connected': '尚未连接',
+}
+
+const TEST_TONE: Record<ConnectionTestVerdict, string> = {
+  valid: TONE_COLOR['ok'] ?? 'rgba(127,127,127,.9)',
+  refreshed: TONE_COLOR['ok'] ?? 'rgba(127,127,127,.9)',
+  invalid: TONE_COLOR['bad'] ?? 'rgba(127,127,127,.9)',
+  degraded: TONE_COLOR['pending'] ?? 'rgba(127,127,127,.9)',
+  unknown: TONE_COLOR['pending'] ?? 'rgba(127,127,127,.9)',
+  'not-connected': TONE_COLOR['neutral'] ?? 'rgba(127,127,127,.9)',
+}
+
 interface BoardStatusInfo {
   name: string
   categoryKey: string
   categoryName: string
   colorName: string
+}
+
+/**
+ * One sprint an issue belongs to, as the host flattened it.
+ *
+ * Jira keeps an array of these per issue; `state` is `active` / `future` /
+ * `closed` (lower-cased), and an issue outside every sprint has no entries at
+ * all.
+ */
+interface BoardSprint {
+  id: string
+  name: string
+  state: string
+  startDate?: string
+  endDate?: string
 }
 
 interface BoardIssue {
@@ -170,6 +275,8 @@ interface BoardIssue {
   updated?: string
   projectKey?: string
   projectName?: string
+  /** Sprints this issue belongs to, newest state first; empty when none. */
+  sprints?: BoardSprint[]
   url?: string
 }
 
@@ -178,6 +285,18 @@ interface BoardTransition {
   name: string
   toName: string
   toCategoryKey: string
+}
+
+/** One project the authorization can see, as `GET /projects` lists it. */
+interface BoardProject {
+  key: string
+  name: string
+  /**
+   * The site's own last-issue-update stamp for the project, which is what lets
+   * the picker lead with "what changed lately" instead of an alphabetical wall.
+   * Absent when the site reported no insight.
+   */
+  updated?: string
 }
 
 interface BoardPayload {
@@ -238,6 +357,167 @@ async function api<T>(path: string, method: 'GET' | 'POST', body?: unknown): Pro
 }
 
 // ---------------------------------------------------------------------------
+// Panel preference
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the Jira panel is offered in the sidebar, and which projects are
+ * pinned to the front of the board.
+ *
+ * The host owns both values so a choice follows the profile rather than one
+ * browser tab's storage; this module keeps the last answer in memory because
+ * two surfaces read it — the Settings switch and the slot registration itself,
+ * which is not a React component.
+ */
+interface PanelPrefs {
+  panelVisible: boolean
+  /** Pinned project keys, in pin order (oldest pin first). */
+  pinnedProjects: string[]
+  /** Recently opened project keys, newest first. */
+  recentProjects: string[]
+}
+
+interface PanelPrefsState {
+  value: PanelPrefs
+  /** The host has answered (or the request failed) and the switch may act. */
+  loaded: boolean
+}
+
+/** Until the host says otherwise the panel is shown: refusing to register one over a transport error would be worse. */
+const DEFAULT_PANEL_PREFS: PanelPrefs = { panelVisible: true, pinnedProjects: [], recentProjects: [] }
+
+let panelPrefs: PanelPrefsState = { value: DEFAULT_PANEL_PREFS, loaded: false }
+const panelPrefsListeners = new Set<() => void>()
+
+function publishPanelPrefs(value: PanelPrefs, loaded: boolean): void {
+  panelPrefs = { value, loaded }
+  // Copy before iterating: a listener may dispose itself, or another one.
+  for (const listener of [...panelPrefsListeners]) listener()
+}
+
+function subscribePanelPrefs(listener: () => void): () => void {
+  panelPrefsListeners.add(listener)
+  return () => {
+    panelPrefsListeners.delete(listener)
+  }
+}
+
+/**
+ * Normalize whatever the host sent.
+ *
+ * `panelVisible`: anything but an explicit `false` means visible. The pinned
+ * list is filtered down to keys that can be project keys, because it is opaque
+ * deployment data by the time it reaches the browser and a malformed entry must
+ * not become a chip with no project behind it.
+ */
+function panelPrefsOf(payload: { prefs?: PanelPrefs }): PanelPrefs {
+  const keysOf = (value: unknown): string[] => {
+    const keys: string[] = []
+    if (!Array.isArray(value)) return keys
+    for (const entry of value) {
+      if (typeof entry !== 'string') continue
+      const key = entry.trim().toUpperCase()
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key)) continue
+      if (!keys.includes(key)) keys.push(key)
+    }
+    return keys
+  }
+  return {
+    panelVisible: payload.prefs?.panelVisible !== false,
+    pinnedProjects: keysOf(payload.prefs?.pinnedProjects),
+    recentProjects: keysOf(payload.prefs?.recentProjects),
+  }
+}
+
+/**
+ * Read the stored preference once per page load.
+ *
+ * A failure is not surfaced: the endpoint is missing on an older host and the
+ * request is fenced when nobody is signed in, and neither is a reason to show a
+ * Settings error before the user has touched anything.
+ */
+async function loadPanelPrefs(): Promise<void> {
+  try {
+    const response = await api<{ ok: boolean; prefs: PanelPrefs }>('/prefs', 'GET')
+    publishPanelPrefs(panelPrefsOf(response), true)
+  } catch {
+    publishPanelPrefs(panelPrefs.value, true)
+  }
+}
+
+/** Persist a change and adopt what the host actually stored. */
+async function savePanelVisible(visible: boolean): Promise<void> {
+  const response = await api<{ ok: boolean; prefs: PanelPrefs }>('/prefs', 'POST', { panelVisible: visible })
+  publishPanelPrefs(panelPrefsOf(response), true)
+}
+
+/**
+ * Persist the pinned-project list and adopt the stored order.
+ *
+ * The response — not the value that was sent — becomes the new state: the host
+ * normalizes, de-duplicates and caps the list, so echoing the request back
+ * would let a divergence between the two surfaces go unnoticed until reload.
+ */
+async function savePinnedProjects(pinned: readonly string[]): Promise<void> {
+  const response = await api<{ ok: boolean; prefs: PanelPrefs }>('/prefs', 'POST', { pinnedProjects: [...pinned] })
+  publishPanelPrefs(panelPrefsOf(response), true)
+}
+
+/**
+ * Persist the recently-opened list and adopt the stored order.
+ *
+ * Written on every project switch, so it is fire-and-forget: a failed write must
+ * not interrupt the click, and the in-memory list already reflects the choice.
+ * The response still becomes the new state when it arrives, because the host
+ * normalizes and caps the list.
+ */
+async function saveRecentProjects(recent: readonly string[]): Promise<void> {
+  const response = await api<{ ok: boolean; prefs: PanelPrefs }>('/prefs', 'POST', { recentProjects: [...recent] })
+  publishPanelPrefs(panelPrefsOf(response), true)
+}
+
+/**
+ * Move one project key to the end of the pinned list, or take it out.
+ *
+ * Pure, so the order contract is testable without a browser: pinning APPENDS,
+ * which is what makes "pin them in the order you clicked" true, and the same
+ * call with the key already present removes it — a pin has to be reversible
+ * from the chip that created it.
+ */
+function togglePinned(pinned: readonly string[], key: string): string[] {
+  const existing = pinned.filter((entry) => entry !== key)
+  return existing.length === pinned.length ? [...pinned, key] : existing
+}
+
+/**
+ * Move one project key to the FRONT of the recent list.
+ *
+ * Newest first is the whole contract: the strip answers "where was I", so the
+ * project just opened has to lead it. A repeat moves the existing entry rather
+ * than duplicating it, and the list is bounded so it stays a strip.
+ *
+ * Pure for the same reason `togglePinned` is: this ordering is the feature.
+ */
+const MAX_RECENT_PROJECTS = 8
+
+function pushRecent(recent: readonly string[], key: string): string[] {
+  const next = [key, ...recent.filter((entry) => entry !== key)]
+  return next.slice(0, MAX_RECENT_PROJECTS)
+}
+
+/** The shared preference, observable from React. */
+function usePanelPrefs(): PanelPrefsState {
+  const [state, setState] = React.useState(panelPrefs)
+  React.useEffect(() => {
+    setState(panelPrefs)
+    return subscribePanelPrefs(() => {
+      setState(panelPrefs)
+    })
+  }, [])
+  return state
+}
+
+// ---------------------------------------------------------------------------
 // Primitives
 // ---------------------------------------------------------------------------
 
@@ -269,6 +549,65 @@ function Badge({ status }: { status: Status }): React.ReactElement {
       style: { width: 8, height: 8, borderRadius: 999, background: color, display: 'inline-block' },
     }),
     STATUS_TEXT[status],
+  )
+}
+
+/**
+ * A boolean preference switch.
+ *
+ * A button with `role="switch"` rather than a checkbox: the track and knob are
+ * pure layout, and a native checkbox would need the same properties plus a
+ * cross-browser `appearance` reset.
+ */
+function Switch({
+  checked,
+  busy,
+  label,
+  onChange,
+}: {
+  checked: boolean
+  busy: boolean
+  label: string
+  onChange: () => void
+}): React.ReactElement {
+  return LI(
+    'button',
+    {
+      type: 'button',
+      role: 'switch',
+      'aria-checked': checked,
+      'aria-label': label,
+      title: label,
+      disabled: busy,
+      onClick: onChange,
+      style: {
+        position: 'relative',
+        flex: 'none',
+        width: 40,
+        height: 23,
+        padding: 0,
+        borderRadius: 999,
+        border: `1px solid ${checked ? C.accent : C.border}`,
+        background: checked ? C.accent : 'transparent',
+        cursor: busy ? 'default' : 'pointer',
+        opacity: busy ? 0.55 : 1,
+        transition: 'background-color .16s ease, border-color .16s ease, opacity .16s ease',
+      },
+    },
+    LI('span', {
+      key: 'knob',
+      style: {
+        position: 'absolute',
+        top: 3,
+        left: checked ? 20 : 3,
+        width: 15,
+        height: 15,
+        borderRadius: 999,
+        background: checked ? '#fff' : C.textFaint,
+        boxShadow: checked ? '0 1px 2px rgba(0,0,0,.32)' : 'none',
+        transition: 'left .16s ease, background-color .16s ease',
+      },
+    }),
   )
 }
 
@@ -367,6 +706,8 @@ function Mark({ size = 18 }: { size?: number }): React.ReactElement {
 /** The client context surface this half uses (typed structurally). */
 interface ClientContext {
   get?(service: string): unknown
+  /** Fiber-scoped cleanup, when the runtime exposes it (Cordis does). */
+  effect?(work: () => (() => void) | undefined, label?: string): void
   slots: {
     inject(key: string, callback: () => unknown): () => void
     register(options: Record<string, unknown>, component: React.ComponentType<never>): unknown
@@ -868,10 +1209,11 @@ function CardMenu({
         maxHeight: '70vh',
         overflowY: 'auto',
         zIndex: 40,
-        background: C.surface,
+        background: C.menu,
+        backdropFilter: 'blur(12px)',
         border: `1px solid ${C.border}`,
         borderRadius: 10,
-        boxShadow: '0 12px 32px rgba(0,0,0,.22)',
+        boxShadow: '0 14px 34px rgba(0,0,0,.28)',
         padding: 5,
       },
     },
@@ -954,13 +1296,24 @@ function CardMenu({
 // Settings page → Atlassian
 // ---------------------------------------------------------------------------
 
+/**
+ * The last `/status` answer, so reopening a panel does not blank its header.
+ *
+ * A cache, never a source of truth: it expires after one slow-poll period and
+ * every explicit `refresh()` overwrites it.
+ */
+let lastStatus: { payload: StatusPayload; at: number } | undefined
+
+/** One slow-poll period: a read that old is due on the next tick anyway. */
+const STATUS_CACHE_TTL = 8_000
+
 /** Poll the host's status; fast while authorization is in flight, slow after. */
 function useStatus(): {
   payload: StatusPayload | undefined
   transportError: string | undefined
   refresh: () => Promise<void>
 } {
-  const [payload, setPayload] = React.useState<StatusPayload | undefined>(undefined)
+  const [payload, setPayload] = React.useState<StatusPayload | undefined>(() => lastStatus?.payload)
   const [transportError, setTransportError] = React.useState<string | undefined>(undefined)
   const mounted = React.useRef(true)
   const sequence = React.useRef(0)
@@ -981,6 +1334,7 @@ function useStatus(): {
       if (mounted.current && ticket === sequence.current) {
         setPayload(next)
         setTransportError(undefined)
+        lastStatus = { payload: next, at: Date.now() }
       }
     } catch (error) {
       if (mounted.current && ticket === sequence.current) {
@@ -990,6 +1344,10 @@ function useStatus(): {
   }, [])
 
   React.useEffect(() => {
+    // A snapshot younger than the poll period answers what the next tick would
+    // ask, so reopening a panel does not blank its header just to re-read it.
+    const at = lastStatus?.at
+    if (at !== undefined && Date.now() - at < STATUS_CACHE_TTL) return
     void refresh()
   }, [refresh])
 
@@ -1039,8 +1397,20 @@ function patchNavGlyph(): void {
 
 function AtlassianSettings(): React.ReactElement {
   const { payload, transportError, refresh } = useStatus()
+  const panel = usePanelPrefs()
   const [busy, setBusy] = React.useState(false)
+  const [testing, setTesting] = React.useState(false)
+  const [test, setTest] = React.useState<ConnectionTest | undefined>(undefined)
+  const [panelBusy, setPanelBusy] = React.useState(false)
+  const [panelError, setPanelError] = React.useState<string | undefined>(undefined)
+  const [toolsOpen, setToolsOpen] = React.useState(false)
+  const [tools, setTools] = React.useState<BridgedTool[] | undefined>(undefined)
+  const [toolsLoading, setToolsLoading] = React.useState(false)
+  const [toolsError, setToolsError] = React.useState<string | undefined>(undefined)
+  const [toolQuery, setToolQuery] = React.useState('')
   const mounted = React.useRef(true)
+  /** Bumped whenever the tool generation changes, so a stale fetch cannot land. */
+  const toolEpoch = React.useRef(0)
 
   React.useEffect(() => {
     mounted.current = true
@@ -1070,9 +1440,43 @@ function AtlassianSettings(): React.ReactElement {
     }
   }, [])
 
+  // The catalogue is fetched on first expand, not with the status poll: 197
+  // descriptions would dominate a payload that is refreshed every few seconds.
+  const loadTools = React.useCallback(async (): Promise<void> => {
+    const ticket = toolEpoch.current
+    setToolsLoading(true)
+    setToolsError(undefined)
+    try {
+      const response = await api<{ ok: boolean; tools: BridgedTool[] }>('/tools', 'GET')
+      if (mounted.current && ticket === toolEpoch.current) setTools(response.tools)
+    } catch (error) {
+      if (mounted.current && ticket === toolEpoch.current) {
+        setToolsError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (mounted.current && ticket === toolEpoch.current) setToolsLoading(false)
+    }
+  }, [])
+
+  const toggleTools = React.useCallback((): void => {
+    const next = !toolsOpen
+    setToolsOpen(next)
+    if (next && tools === undefined && !toolsLoading) void loadTools()
+  }, [toolsOpen, tools, toolsLoading, loadTools])
+
   const act = React.useCallback(
     async (action: 'connect' | 'disconnect'): Promise<void> => {
       setBusy(true)
+      // A verdict about the previous connection would outlive the connection it
+      // described; clear it before changing that connection. The tool catalogue
+      // belongs to the same generation, so it goes too.
+      setTest(undefined)
+      toolEpoch.current += 1
+      setTools(undefined)
+      setToolsError(undefined)
+      setToolsLoading(false)
+      setToolsOpen(false)
+      setToolQuery('')
       try {
         await api(`/${action}`, 'POST')
       } catch (error) {
@@ -1085,9 +1489,82 @@ function AtlassianSettings(): React.ReactElement {
     [refresh],
   )
 
+  const runTest = React.useCallback(async (): Promise<void> => {
+    setTesting(true)
+    setTest(undefined)
+    try {
+      const response = await api<{ ok: boolean; test: ConnectionTest }>('/test', 'POST')
+      if (mounted.current) {
+        setTest(response.test)
+        // `invalid` unregisters every tool server-side, so a catalogue already
+        // on screen would describe a generation that no longer exists.
+        if (response.test.verdict === 'invalid') {
+          toolEpoch.current += 1
+          setTools(undefined)
+          setToolsLoading(false)
+          setToolsOpen(false)
+          setToolQuery('')
+        }
+      }
+    } catch (error) {
+      if (mounted.current) {
+        setTest({
+          ok: false,
+          verdict: 'unknown',
+          checkedAt: new Date().toISOString(),
+          durationMs: 0,
+          message: `无法发起测试：${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
+    } finally {
+      if (mounted.current) setTesting(false)
+      // An invalid verdict clears the token and unregisters the tools, so the
+      // page must re-read the snapshot rather than keep showing "connected".
+      await refresh()
+    }
+  }, [refresh])
+
+  /**
+   * Flip the sidebar entry.
+   *
+   * Pessimistic on purpose: the host owns the document, and painting the new
+   * state before that write succeeds would show a switch that disagrees with
+   * the sidebar. A failed write leaves the switch where it was and says why.
+   */
+  const togglePanel = React.useCallback(async (): Promise<void> => {
+    if (panelBusy || !panel.loaded) return
+    setPanelBusy(true)
+    setPanelError(undefined)
+    try {
+      await savePanelVisible(!panel.value.panelVisible)
+    } catch (failure) {
+      setPanelError(`保存失败：${failure instanceof Error ? failure.message : String(failure)}`)
+    } finally {
+      if (mounted.current) setPanelBusy(false)
+    }
+  }, [panelBusy, panel.loaded, panel.value.panelVisible])
+
   const status = payload?.status ?? 'idle'
   const authorizationUrl = payload?.authorizationUrl
   const error = transportError ?? payload?.error
+  const toolCount = payload?.toolCount ?? 0
+
+  const filteredTools = React.useMemo(() => {
+    const list = tools ?? []
+    const needle = toolQuery.trim().toLowerCase()
+    if (needle === '') return list
+    return list.filter((tool) =>
+      `${tool.name}\n${tool.rawName}\n${tool.description}`.toLowerCase().includes(needle),
+    )
+  }, [tools, toolQuery])
+
+  // Losing every tool (disconnect, or a probe that invalidated the token) makes
+  // an open catalogue describe a generation that no longer exists.
+  React.useEffect(() => {
+    if (toolCount === 0) setToolsOpen(false)
+  }, [toolCount])
+
+  const hintStyle: React.CSSProperties = { padding: '12px 2px', fontSize: '0.82em', opacity: 0.7 }
 
   return LI(
     'div',
@@ -1106,7 +1583,7 @@ function AtlassianSettings(): React.ReactElement {
     LI(
       'p',
       { key: 'intro', style: { opacity: 0.7, fontSize: '0.9em', marginTop: 0 } },
-      '一次浏览器授权后，Jira、Confluence、Jira Service Management、Bitbucket 与 Compass 的工具会作为原生工具出现在 agent 的工具列表里，侧边栏也会多出一块 Jira 看板。',
+      '一次浏览器授权后，Jira、Confluence、Bitbucket、Goals、Projects 与 Loom 的工具会作为原生工具出现在 agent 的工具列表里，侧边栏也会多出一块 Jira 看板（可在下面的「侧边栏入口」里关掉）。',
     ),
     LI(
       'div',
@@ -1164,14 +1641,14 @@ function AtlassianSettings(): React.ReactElement {
       : null,
     LI(
       'div',
-      { key: 'actions', style: { display: 'flex', gap: 10 } },
+      { key: 'actions', style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
       LI(
         'button',
         {
           key: 'connect',
           type: 'button',
-          style: { ...button, opacity: busy || status === 'ready' ? 0.5 : 1 },
-          disabled: busy || status === 'ready',
+          style: { ...button, opacity: busy || testing || status === 'ready' ? 0.5 : 1 },
+          disabled: busy || testing || status === 'ready',
           onClick: () => {
             void act('connect')
           },
@@ -1181,16 +1658,250 @@ function AtlassianSettings(): React.ReactElement {
       LI(
         'button',
         {
+          key: 'test',
+          type: 'button',
+          title:
+            status === 'ready'
+              ? '调用一次只读工具，验证当前令牌是否仍被 Atlassian 接受'
+              : '连接建立后才能测试',
+          style: { ...button, opacity: status === 'ready' && !busy && !testing ? 1 : 0.5 },
+          disabled: status !== 'ready' || busy || testing,
+          onClick: () => {
+            void runTest()
+          },
+        },
+        testing ? '测试中…' : '测试连接',
+      ),
+      LI(
+        'button',
+        {
           key: 'disconnect',
           type: 'button',
-          style: { ...button, opacity: busy || status === 'idle' ? 0.5 : 1 },
-          disabled: busy || status === 'idle',
+          style: { ...button, opacity: busy || testing || status === 'idle' ? 0.5 : 1 },
+          disabled: busy || testing || status === 'idle',
           onClick: () => {
             void act('disconnect')
           },
         },
         '断开连接',
       ),
+    ),
+    test === undefined
+      ? null
+      : LI(
+          'div',
+          {
+            key: 'test-result',
+            role: 'status',
+            style: { ...box, marginTop: 14, marginBottom: 0, borderColor: TEST_TONE[test.verdict] },
+          },
+          LI(
+            'div',
+            {
+              key: 'head',
+              style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' },
+            },
+            LI('span', {
+              key: 'dot',
+              style: {
+                width: 8,
+                height: 8,
+                borderRadius: 999,
+                background: TEST_TONE[test.verdict],
+                flex: 'none',
+              },
+            }),
+            LI(
+              'span',
+              { key: 'label', style: { fontWeight: 600, fontSize: '0.9em', color: TEST_TONE[test.verdict] } },
+              TEST_LABEL[test.verdict],
+            ),
+            LI(
+              'span',
+              { key: 'meta', style: { marginLeft: 'auto', fontSize: '0.78em', color: C.textFaint } },
+              `${String(test.durationMs)} ms · ${relativeTime(test.checkedAt)}`,
+            ),
+          ),
+          LI(
+            'div',
+            { key: 'message', style: { fontSize: '0.86em', lineHeight: 1.6, overflowWrap: 'anywhere' } },
+            test.message,
+          ),
+          test.tool === undefined
+            ? null
+            : LI(
+                'div',
+                { key: 'tool', style: { marginTop: 6, fontSize: '0.78em', color: C.textFaint } },
+                `探测工具 ${test.tool}${test.site === undefined ? '' : ` · ${test.site}`}`,
+              ),
+        ),
+    // A UI preference, not a connection setting: it stays usable while the
+    // token is dead, because hiding the panel does not depend on Atlassian.
+    LI(
+      'div',
+      { key: 'panel-pref', style: { ...box, marginTop: 14, marginBottom: 0 } },
+      LI(
+        'div',
+        { key: 'row', style: { display: 'flex', alignItems: 'center', gap: 14 } },
+        LI(
+          'div',
+          { key: 'copy', style: { flex: 1, minWidth: 0 } },
+          LI('div', { key: 'title', style: { fontSize: '0.9em', fontWeight: 600 } }, '侧边栏入口'),
+          LI(
+            'div',
+            { key: 'hint', style: { marginTop: 3, fontSize: '0.8em', color: C.textFaint, lineHeight: 1.5 } },
+            panel.loaded
+              ? '关闭后侧边栏不再显示 Jira 图标；看板数据与 agent 工具都不会受影响，随时可以再打开。'
+              : '读取中…',
+          ),
+        ),
+        LI(Switch, {
+          key: 'switch',
+          checked: panel.value.panelVisible,
+          busy: panelBusy || !panel.loaded,
+          label: '在侧边栏显示 Jira 面板',
+          onChange: () => {
+            void togglePanel()
+          },
+        }),
+      ),
+      panelError === undefined
+        ? null
+        : LI('div', { key: 'error', style: { marginTop: 8, fontSize: '0.8em', color: TONE_COLOR['bad'] } }, panelError),
+    ),
+    LI(
+      'div',
+      { key: 'tool-catalog', style: { ...box, marginTop: 14, marginBottom: 0 } },
+      LI(
+        'div',
+        { key: 'head', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+        LI(
+          'div',
+          { key: 'titles', style: { flex: 1, minWidth: 0 } },
+          LI('div', { key: 'title', style: { fontSize: '0.9em', fontWeight: 600 } }, '工具清单'),
+          LI(
+            'div',
+            { key: 'sub', style: { marginTop: 2, fontSize: '0.8em', opacity: 0.62 } },
+            toolCount === 0
+              ? '连接后这里会列出服务端提供的全部工具及说明。'
+              : `共 ${String(toolCount)} 个工具，展开后可搜索名称与说明。`,
+          ),
+        ),
+        LI(
+          'button',
+          {
+            key: 'toggle',
+            type: 'button',
+            style: { ...button, opacity: toolCount === 0 ? 0.5 : 1 },
+            disabled: toolCount === 0,
+            onClick: toggleTools,
+          },
+          toolsOpen ? '收起' : '查看工具',
+        ),
+      ),
+      toolsOpen
+        ? LI(
+            'div',
+            { key: 'panel' },
+            LI(
+              'div',
+              { key: 'search', style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 } },
+              LI('input', {
+                key: 'q',
+                type: 'search',
+                'aria-label': '搜索工具',
+                value: toolQuery,
+                placeholder: '搜索工具名或说明…',
+                onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+                  setToolQuery(event.target.value)
+                },
+                style: { ...input, flex: 1 },
+              }),
+              LI(
+                'span',
+                { key: 'n', style: { fontSize: '0.78em', color: C.textFaint, whiteSpace: 'nowrap' } },
+                `${String(filteredTools.length)} / ${String(tools?.length ?? toolCount)}`,
+              ),
+            ),
+            LI(
+              'div',
+              {
+                key: 'list',
+                style: {
+                  marginTop: 10,
+                  maxHeight: 420,
+                  overflowY: 'auto',
+                  borderTop: `1px solid ${C.borderSoft}`,
+                },
+              },
+              toolsLoading
+                ? LI('div', { key: 'loading', style: hintStyle }, '读取工具清单…')
+                : toolsError !== undefined
+                  ? LI(
+                      'div',
+                      { key: 'error', style: { ...hintStyle, color: TONE_COLOR['bad'] } },
+                      toolsError,
+                      ' ',
+                      LI(
+                        'button',
+                        {
+                          key: 'retry',
+                          type: 'button',
+                          style: { ...chip, marginLeft: 6 },
+                          onClick: () => {
+                            void loadTools()
+                          },
+                        },
+                        '重试',
+                      ),
+                    )
+                  : filteredTools.length === 0
+                    ? LI(
+                        'div',
+                        { key: 'empty', style: hintStyle },
+                        toolQuery.trim() === '' ? '当前没有已注册的工具。' : '没有匹配的工具。',
+                      )
+                    : filteredTools.map((tool) =>
+                        LI(
+                          'div',
+                          {
+                            key: tool.name,
+                            style: { padding: '9px 2px', borderBottom: `1px solid ${C.borderSoft}` },
+                          },
+                          LI(
+                            'div',
+                            {
+                              key: 'name',
+                              title: tool.rawName,
+                              style: {
+                                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                                fontSize: '0.8em',
+                                fontWeight: 600,
+                                overflowWrap: 'anywhere',
+                              },
+                            },
+                            tool.name,
+                          ),
+                          LI(
+                            'div',
+                            {
+                              key: 'desc',
+                              style: {
+                                marginTop: 4,
+                                fontSize: '0.8em',
+                                lineHeight: 1.55,
+                                opacity: 0.72,
+                                whiteSpace: 'pre-wrap',
+                                overflowWrap: 'anywhere',
+                              },
+                            },
+                            tool.description === '' ? '（服务端没有提供说明）' : tool.description,
+                          ),
+                        ),
+                      ),
+            ),
+          )
+        : null,
     ),
   )
 }
@@ -1210,10 +1921,10 @@ const CATEGORY_ORDER = ['new', 'indeterminate', 'done', 'undefined'] as const
  * define them.
  */
 const CATEGORY_TONE: Record<string, string> = {
-  new: tok('status-neutral', 'rgba(127,127,127,.9)'),
-  indeterminate: tok('status-warning', '#c98a00'),
-  done: tok('status-success', '#1a9e5c'),
-  undefined: tok('status-neutral', 'rgba(127,127,127,.6)'),
+  new: alias('label-tertiary', 'text-tertiary', '#81858c'),
+  indeterminate: tone('#c98a00'),
+  done: tone('#1a9e5c'),
+  undefined: alias('label-tertiary', 'text-tertiary', '#81858c'),
 }
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -1238,7 +1949,8 @@ function projectTone(key: string | undefined): string {
   if (key === undefined) return C.textDim
   let hash = 0
   for (let index = 0; index < key.length; index += 1) hash = (hash * 31 + key.charCodeAt(index)) >>> 0
-  return PROJECT_PALETTE[hash % PROJECT_PALETTE.length] ?? C.accent
+  const base = PROJECT_PALETTE[hash % PROJECT_PALETTE.length]
+  return base === undefined ? C.accent : tone(base)
 }
 
 /**
@@ -1269,6 +1981,22 @@ const VIEWS = [
 const MINE_CLAUSE = 'assignee = currentUser()'
 
 const MINE_PATTERN = /assignee\s*=\s*currentUser\s*\(\s*\)/i
+/**
+ * Insert one clause into the WHERE part of a query.
+ *
+ * JQL requires `ORDER BY` to be last, so a constraint has to land before it. A
+ * query that is nothing but an ORDER BY must not gain a leading `AND` either,
+ * which is why the empty head is handled explicitly.
+ */
+function foldClause(jql: string, clause: string): string {
+  const trimmed = jql.trim()
+  if (trimmed === '') return clause
+  const order = /\border\s+by\b/i.exec(trimmed)
+  if (order === null) return `${trimmed} AND ${clause}`
+  const head = trimmed.slice(0, order.index).trimEnd()
+  const tail = trimmed.slice(order.index)
+  return head === '' ? `${clause} ${tail}` : `${head} AND ${clause} ${tail}`
+}
 
 /**
  * Fold the "assigned to me" constraint into a query.
@@ -1279,23 +2007,254 @@ const MINE_PATTERN = /assignee\s*=\s*currentUser\s*\(\s*\)/i
  * `currentUser()` is also the only correct way to ask — the panel never learns
  * its own display name, and matching one would break on a rename.
  *
- * The clause goes BEFORE a trailing `ORDER BY`, because JQL requires the
- * ordering to come last, and the fold is idempotent: a query that already pins
- * the assignee — including one the user typed into the JQL box — is returned
- * unchanged, so toggling the chip over a hand-written query cannot duplicate
- * the condition.
+ * The fold is idempotent: a query that already pins the assignee — including
+ * one the user typed into the JQL box — is returned unchanged, so toggling the
+ * chip over a hand-written query cannot duplicate the condition.
  */
 function withMine(jql: string, mine: boolean): string {
   if (!mine) return jql
   const trimmed = jql.trim()
   if (MINE_PATTERN.test(trimmed)) return trimmed
-  if (trimmed === '') return MINE_CLAUSE
-  const order = /\border\s+by\b/i.exec(trimmed)
-  if (order === null) return `${trimmed} AND ${MINE_CLAUSE}`
-  const head = trimmed.slice(0, order.index).trimEnd()
-  const tail = trimmed.slice(order.index)
-  // A query that is nothing but an ORDER BY must not gain a leading `AND`.
-  return head === '' ? `${MINE_CLAUSE} ${tail}` : `${head} AND ${MINE_CLAUSE} ${tail}`
+  return foldClause(trimmed, MINE_CLAUSE)
+}
+
+/**
+ * The project clause a selectable project stands for.
+ *
+ * A project is mandatory, so this is never the "all projects" case: the board
+ * always reads one project at a time, and the JQL says which. That is what makes
+ * the issue count in the row truthful — it is the project's own count, not the
+ * first page of a site-wide query.
+ *
+ * Keys are `[A-Za-z][A-Za-z0-9_]*` in Jira, so the value is emitted bare; a
+ * quoted form is still accepted on read (`project = "DEMO"`), because a
+ * hand-written query may carry one.
+ */
+function projectClauseOf(project: string): string {
+  const key = project.trim()
+  if (key === '') return ''
+  return /^[A-Za-z][A-Za-z0-9_]*$/.test(key) ? `project = ${key}` : `project = "${key.replace(/"/g, '\\"')}"`
+}
+
+/** Any `project` restriction in the query, whatever its operator. */
+const PROJECT_CLAUSE_PATTERN = /\bproject\s*(?:=|!=|in\b|not\s+in\b|is\b)/i
+
+/** The exact project key a `project = KEY` clause names, when it names one. */
+const PROJECT_EQUALS_PATTERN = /\bproject\s*=\s*"?([A-Za-z][A-Za-z0-9_]*)"?/i
+
+/**
+ * Fold the selected project into a query.
+ *
+ * The project is the board's SCOPE, not another optional filter, so it has to be
+ * in the JQL: the server must page that project's issues, not hand back one page
+ * of a site-wide query the panel then filters.
+ *
+ * A single `project = KEY` already in the query is REWRITTEN rather than kept,
+ * because the chip is the selection the user is looking at — leaving a stale
+ * key in place would make clicking a project chip appear to do nothing. A
+ * SET-shaped restriction (`project in (...)`, `project != X`) is left alone: it
+ * is a deliberate multi-project question one chip cannot express, and folding a
+ * second clause onto it would turn it into a contradiction.
+ */
+function withProject(jql: string, project: string): string {
+  const clause = projectClauseOf(project)
+  if (clause === '') return jql
+  const trimmed = jql.trim()
+  if (PROJECT_EQUALS_PATTERN.test(trimmed)) {
+    return trimmed.replace(PROJECT_EQUALS_PATTERN, clause)
+  }
+  if (PROJECT_CLAUSE_PATTERN.test(trimmed)) return trimmed
+  return foldClause(trimmed, clause)
+}
+
+/**
+ * What the JQL itself says about the project chip.
+ *
+ * Mirrors `sprintFilterOf`: committing a hand-written query must not leave a
+ * chip highlighted for a project the query no longer names. Returns '' when the
+ * query restricts projects in a way one chip cannot express (`project in (A,B)`),
+ * which is the honest answer — the query is the truth, the row just stops
+ * claiming one of them.
+ */
+function projectFilterOf(jql: string): string {
+  if (!PROJECT_CLAUSE_PATTERN.test(jql)) return ''
+  const exact = PROJECT_EQUALS_PATTERN.exec(jql)
+  return exact?.[1] === undefined ? '' : exact[1].toUpperCase()
+}
+
+/**
+ * The sprint filter, as a string so it can live in the snapshot.
+ *
+ * `'all'`, `'open'` (Jira's own open sprints), `'empty'` (not in any sprint) or
+ * `'id:<sprintId>'` for one exact sprint.
+ */
+const SPRINT_ALL = 'all'
+const SPRINT_OPEN = 'open'
+const SPRINT_EMPTY = 'empty'
+const SPRINT_ID_PREFIX = 'id:'
+
+/**
+ * The JQL clause a sprint selection stands for, or '' for no constraint.
+ *
+ * Sprint filtering is SERVER-side for the same reason "assigned to me" is: the
+ * board holds one bounded page, and a sprint whose issues fall outside that page
+ * would read as an empty sprint.
+ *
+ * `sprint = <id>` is the exact-sprint form and is what a catalogue chip emits.
+ * An id is numeric in practice, but a name is accepted too — a hand-edited
+ * selection or a board that only carries names must still produce valid JQL,
+ * which means quoting it rather than letting Jira parse a bare word.
+ */
+function sprintClauseOf(selection: string): string {
+  if (selection === SPRINT_OPEN) return 'sprint IN openSprints()'
+  if (selection === SPRINT_EMPTY) return 'sprint IS EMPTY'
+  if (selection.startsWith(SPRINT_ID_PREFIX)) {
+    const id = selection.slice(SPRINT_ID_PREFIX.length).trim()
+    if (id === '') return ''
+    if (/^\d+$/.test(id)) return `sprint = ${id}`
+    return `sprint = "${id.replace(/"/g, '\\"')}"`
+  }
+  return ''
+}
+
+/** Fold a sprint selection into a query; `all` leaves it untouched. */
+function withSprint(jql: string, selection: string): string {
+  const clause = sprintClauseOf(selection)
+  return clause === '' ? jql : foldClause(jql, clause)
+}
+
+/**
+ * What the JQL itself says about the sprint filter.
+ *
+ * Seeding the chip from the query is what stops the row from claiming "全部"
+ * while the board is constrained by a hand-written `sprint = 12` — the same
+ * contract the "assigned to me" chip keeps. A quoted id is accepted too, since
+ * that is the form a name-shaped selection produces.
+ */
+function sprintFilterOf(jql: string): string {
+  if (/\bsprint\s+in\s+openSprints\s*\(\s*\)/i.test(jql)) return SPRINT_OPEN
+  if (/\bsprint\s+(?:is\s+empty|=\s*empty)/i.test(jql)) return SPRINT_EMPTY
+  const equal = /\bsprint\s*=\s*"?([^"\s)]+)"?/i.exec(jql)
+  return equal?.[1] === undefined ? SPRINT_ALL : `${SPRINT_ID_PREFIX}${equal[1]}`
+}
+
+/** One selectable sprint, as the server's catalogue describes it. */
+interface SprintOption {
+  id: string
+  name: string
+  state: string
+  startDate?: string
+  endDate?: string
+  boardId?: string
+  boardName?: string
+}
+
+/** A catalogue entry plus how many cards on this page carry it. */
+interface SprintChoice extends SprintOption {
+  count: number
+}
+
+/** The state label a sprint chip's tooltip shows. */
+function sprintStateLabel(state: string): string {
+  if (state === 'active') return '进行中'
+  if (state === 'future') return '未开始'
+  if (state === 'closed') return '已结束'
+  return '状态未知'
+}
+
+/**
+ * Merge the server's sprint catalogue with what the page shows.
+ *
+ * The catalogue is the authority for WHICH sprints exist — a project's sprints
+ * are an enumerable list of named options, not a property an issue happens to
+ * have, and a closed sprint the user still wants to filter by need not appear
+ * on the current page at all. The loaded page contributes only the counts, and
+ * any sprint it carries that the catalogue missed (a board the caller cannot
+ * read, a page loaded before the catalogue arrived) is appended so nothing is
+ * silently unfilterable.
+ *
+ * Ordering: active → future → closed, then most recent end date first, then by
+ * name. A project with 160 sprints must open on the ones that matter.
+ */
+function sprintChoices(
+  catalogue: readonly SprintOption[],
+  issues: readonly BoardIssue[],
+): SprintChoice[] {
+  const counts = new Map<string, number>()
+  for (const issue of issues) {
+    for (const sprint of issue.sprints ?? []) {
+      const id = sprint.id === '' ? sprint.name : sprint.id
+      if (id === '') continue
+      counts.set(id, (counts.get(id) ?? 0) + 1)
+    }
+  }
+
+  const merged = new Map<string, SprintOption>()
+  for (const option of catalogue) {
+    if (option.id === '') continue
+    merged.set(option.id, option)
+  }
+  for (const issue of issues) {
+    for (const sprint of issue.sprints ?? []) {
+      const id = sprint.id === '' ? sprint.name : sprint.id
+      if (id === '' || merged.has(id)) continue
+      merged.set(id, { id, name: sprint.name === '' ? id : sprint.name, state: sprint.state })
+    }
+  }
+
+  const rank = (state: string): number => (state === 'active' ? 0 : state === 'future' ? 1 : 2)
+  const endedAt = (option: SprintOption): number => {
+    const time = option.endDate === undefined ? Number.NaN : Date.parse(option.endDate)
+    return Number.isNaN(time) ? 0 : time
+  }
+  return [...merged.values()]
+    .map((option) => ({ ...option, count: counts.get(option.id) ?? 0 }))
+    .sort(
+      (left, right) =>
+        rank(left.state) - rank(right.state) ||
+        endedAt(right) - endedAt(left) ||
+        left.name.localeCompare(right.name),
+    )
+}
+
+/** The `PROJECT-123` part of a regex match, upper-cased the way Jira writes it. */
+function keyOfMatch(match: RegExpExecArray): string | undefined {
+  const project = match[1]
+  const number = match[2]
+  if (project === undefined || number === undefined) return undefined
+  // Jira keys are upper-case; typing one in lower-case is common and still exact.
+  return `${project.toUpperCase()}-${number}`
+}
+
+/**
+ * The one issue a search-box query NAMES, when it names one.
+ *
+ * The board filters the page it already holds, which is instant but blind to
+ * everything outside that page — and `HMHP-111` typed into it used to answer
+ * "没有工单" for an issue that plainly exists. A bare key or a pasted Jira link
+ * is not a substring filter, it is an exact question, so it is answered by the
+ * server instead (see `GET /issue/<key>`).
+ *
+ * Only those two shapes are recognized. A key buried in prose stays an ordinary
+ * substring search: guessing which word of a sentence is the key would turn
+ * searching the board into surprise navigation.
+ */
+function issueKeyOf(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (trimmed === '') return undefined
+  const bare = /^([A-Za-z][A-Za-z0-9_]*)-(\d+)$/.exec(trimmed)
+  if (bare !== null) return keyOfMatch(bare)
+  // A link has to look like one before it is scanned: a summary is allowed to
+  // contain `browse`, a URL is not.
+  const looksLikeLink =
+    /^https?:\/\//i.test(trimmed) || /\/(?:browse|issues)\//i.test(trimmed) || /[?&]selectedIssue=/i.test(trimmed)
+  if (!looksLikeLink) return undefined
+  // Jira carries the key in the browse path, in `selectedIssue`, or (newer
+  // sites) in an `/issues/` path; the query string may also be percent-encoded.
+  const inUrl = /(?:\/browse\/|[?&]selectedIssue=|\/issues\/)([A-Za-z][A-Za-z0-9_]*)-(\d+)/i.exec(
+    decodeURIComponent(trimmed),
+  )
+  return inUrl === null ? undefined : keyOfMatch(inUrl)
 }
 
 /** One filter choice, with the count that makes it worth clicking. */
@@ -1321,6 +2280,27 @@ function categoryChoices(issues: readonly BoardIssue[]): Choice[] {
 /** Jira's per-status colour hints, mapped onto something theme-safe. */
 function statusAccent(status: BoardStatusInfo): string {
   return categoryTone(status.categoryKey)
+}
+
+/**
+ * The sprint label a card shows, if any.
+ *
+ * The active sprint wins over every other one — that is the sprint the work is
+ * being done in — and a closed sprint is only shown when it is all the issue
+ * has. Returns undefined for an issue outside every sprint, which is ordinary
+ * on a kanban board and must not render an empty pill.
+ */
+function sprintBadge(issue: BoardIssue): { label: string; title: string } | undefined {
+  const sprints = issue.sprints ?? []
+  if (sprints.length === 0) return undefined
+  const active = sprints.find((entry) => entry.state === 'active')
+  const chosen = active ?? sprints[0]
+  if (chosen === undefined) return undefined
+  const state = chosen.state === 'active' ? '进行中' : chosen.state === 'future' ? '未开始' : chosen.state === 'closed' ? '已结束' : ''
+  return {
+    label: chosen.name === '' ? chosen.id : chosen.name,
+    title: `冲刺：${chosen.name}${state === '' ? '' : `（${state}）`}${active === undefined ? '' : ' · 当前冲刺'}`,
+  }
 }
 
 /** Issue-type glyph, drawn inline so the panel ships no asset. */
@@ -1413,13 +2393,24 @@ function Pill({
   )
 }
 
-/** A selectable filter chip carrying its own count. */
+/**
+ * A selectable filter chip carrying its own count.
+ *
+ * The pill is a wrapper with up to TWO real buttons inside it — the filter and,
+ * for a project, its pin. Neither can be nested in the other: a `<button>`
+ * cannot contain another interactive element, and a `role="button"` span inside
+ * one produces a control screen readers announce twice and some browsers refuse
+ * to route a click to. The wrapper carries the border so the pair still reads
+ * as one chip.
+ */
 function FilterChip({
   active,
   label,
   count,
   tone,
   title,
+  pinned,
+  onPin,
   onClick,
 }: {
   active: boolean
@@ -1427,50 +2418,571 @@ function FilterChip({
   count?: number | undefined
   tone?: string | undefined
   title?: string | undefined
+  /**
+   * Whether this chip's project is pinned to the front of the row.
+   *
+   * `undefined` means "this chip cannot be pinned" (the status chips, for
+   * instance): the affordance only exists where the pin actually means
+   * something, rather than being offered and then ignored.
+   */
+  pinned?: boolean | undefined
+  /** Toggle the pin. Only rendered when `pinned` is defined. */
+  onPin?: (() => void) | undefined
   onClick: () => void
 }): React.ReactElement {
   const color = tone ?? C.accent
+  const pinnable = pinned !== undefined && onPin !== undefined
   return LI(
-    'button',
+    'span',
     {
-      type: 'button',
-      title,
-      'aria-pressed': active,
-      onClick,
+      'data-dsh-jira-filter': '1',
       style: {
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 5,
-        border: `1px solid ${active ? color : C.border}`,
+        border: `1px solid ${active ? color : pinned === true ? C.accent : C.border}`,
         background: active ? C.accentSoft : 'transparent',
-        color: active ? color : C.textDim,
         borderRadius: 999,
-        padding: '3px 10px',
-        fontSize: '0.8em',
-        cursor: 'pointer',
-        fontWeight: active ? 600 : 400,
-        font: 'inherit',
+        // The wrapper owns the shape; the buttons inside must not repaint it.
+        overflow: 'hidden',
       },
     },
-    label,
-    count === undefined
-      ? null
-      : LI(
-          'span',
+    LI(
+      'button',
+      {
+        key: 'chip',
+        type: 'button',
+        title,
+        'aria-pressed': active,
+        'data-dsh-jira-chip': pinnable ? 'project' : 'filter',
+        'data-pinned': pinned === undefined ? '' : pinned ? '1' : '0',
+        onClick,
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          border: 'none',
+          background: 'transparent',
+          color: active ? color : C.textDim,
+          padding: `3px ${String(pinnable ? 4 : 10)}px`,
+          paddingLeft: 10,
+          fontSize: '0.8em',
+          cursor: 'pointer',
+          fontWeight: active || pinned === true ? 600 : 400,
+          font: 'inherit',
+        },
+      },
+      label,
+      count === undefined
+        ? null
+        : LI(
+            'span',
+            {
+              key: 'count',
+              style: {
+                fontSize: '0.86em',
+                minWidth: 15,
+                textAlign: 'center',
+                borderRadius: 999,
+                padding: '0 4px',
+                background: active ? 'transparent' : C.surfaceHover,
+                opacity: active ? 0.85 : 0.7,
+              },
+            },
+            String(count),
+          ),
+    ),
+    pinnable
+      ? LI(
+          'button',
           {
-            key: 'count',
+            key: 'pin',
+            type: 'button',
+            'data-dsh-jira-pin': pinned ? '1' : '0',
+            title: pinned ? `取消固定 ${label}` : `固定 ${label} 到项目行最前`,
+            'aria-pressed': pinned,
+            'aria-label': pinned ? `取消固定 ${label}` : `固定 ${label} 到项目行最前`,
+            onClick: (event: React.MouseEvent) => {
+              // Independent target: pinning must not also narrow the board.
+              event.stopPropagation()
+              onPin()
+            },
             style: {
-              fontSize: '0.86em',
-              minWidth: 15,
-              textAlign: 'center',
-              borderRadius: 999,
-              padding: '0 4px',
-              background: active ? 'transparent' : C.surfaceHover,
-              opacity: active ? 0.85 : 0.7,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              border: 'none',
+              background: 'transparent',
+              // A hairline separates the two targets, so the pin cannot be hit
+              // by accident while aiming at the project name.
+              borderLeft: `1px solid ${pinned ? color : C.borderSoft}`,
+              padding: '3px 7px',
+              cursor: 'pointer',
+              color: pinned ? color : C.textFaint,
+              opacity: pinned ? 1 : 0.6,
+              fontSize: '0.62em',
+              lineHeight: 1,
+              font: 'inherit',
             },
           },
-          String(count),
-        ),
+          // Filled when pinned, hollow when not: the state has to survive being
+          // rendered at a fraction of the chip's font size.
+          pinned ? '●' : '○',
+        )
+      : null,
+  )
+}
+
+/**
+ * The full project catalogue as a searchable picker.
+ *
+ * A chip per project is wrong on a real site: this site lists 148 of them, and
+ * the ones anybody reads are a handful. So the row shows only the RECENT and
+ * PINNED projects, and the entire catalogue lives behind this control — which
+ * filters as you type and reports how much it is narrowing.
+ *
+ * Sorted by the site's own `lastIssueUpdateTime` first (projects that moved
+ * recently lead), then by key: "which project should I open" is far better
+ * answered by "what changed lately" than by an alphabetical wall.
+ */
+function ProjectPicker({
+  options,
+  value,
+  onPick,
+}: {
+  options: readonly BoardProject[]
+  /** The current selection, or '' before one is chosen. */
+  value: string
+  onPick: (key: string) => void
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false)
+  const [needle, setNeedle] = React.useState('')
+  const box = React.useRef<HTMLDivElement | undefined>(undefined)
+
+  React.useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent): void => {
+      const node = box.current
+      if (node !== undefined && event.target instanceof Node && node.contains(event.target)) return
+      setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  // Recently-updated first, then key. An unparsable or missing timestamp sorts
+  // to the end: "no evidence of recency" must not outrank a project that really
+  // did move yesterday.
+  const ranked = React.useMemo(() => {
+    const stamp = (entry: BoardProject): number => {
+      const at = entry.updated === undefined ? Number.NaN : Date.parse(entry.updated)
+      return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY
+    }
+    return [...options].sort((a, b) => stamp(b) - stamp(a) || a.key.localeCompare(b.key))
+  }, [options])
+
+  const term = needle.trim().toLowerCase()
+  const matches =
+    term === ''
+      ? ranked
+      : ranked.filter((entry) => `${entry.key} ${entry.name}`.toLowerCase().includes(term))
+  // Capped so a 148-project site does not paint 148 rows: the search box is how
+  // the rest is reached, and the footer says how many are hidden.
+  const MAX_ROWS = 40
+  const shown = matches.slice(0, MAX_ROWS)
+
+  return LI(
+    'div',
+    { ref: box, 'data-dsh-jira-project-picker': '1', style: { position: 'relative', display: 'inline-flex' } },
+    LI(
+      'button',
+      {
+        key: 'toggle',
+        type: 'button',
+        'aria-haspopup': 'listbox',
+        'aria-expanded': open,
+        title: `在全部 ${String(options.length)} 个项目中查找`,
+        onClick: () => {
+          setOpen(!open)
+          setNeedle('')
+        },
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          border: `1px dashed ${C.border}`,
+          background: 'transparent',
+          color: C.textDim,
+          borderRadius: 999,
+          padding: '3px 10px',
+          fontSize: '0.8em',
+          cursor: 'pointer',
+          font: 'inherit',
+          maxWidth: 220,
+        },
+      },
+      LI(
+        'span',
+        { key: 'label', style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+        `更多项目 · ${String(options.length)}`,
+      ),
+      LI('span', { key: 'caret', style: { opacity: 0.6 } }, '▾'),
+    ),
+    open
+      ? LI(
+          'div',
+          {
+            key: 'list',
+            role: 'listbox',
+            style: {
+              position: 'absolute',
+              top: 'calc(100% + 6px)',
+              left: 0,
+              zIndex: 20,
+              width: 340,
+              maxHeight: 340,
+              overflowY: 'auto',
+              border: `1px solid ${C.border}`,
+              borderRadius: 10,
+              // Opaque, not the shell's translucent menu layer: this list opens
+              // straight over issue cards, and translucent read as ghost text.
+              background: C.pickerList,
+              boxShadow: '0 10px 28px rgba(0,0,0,.22)',
+              padding: 8,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            },
+          },
+          LI('input', {
+            key: 'search',
+            value: needle,
+            placeholder: '按项目键或名称筛选…',
+            spellCheck: false,
+            autoFocus: true,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+              setNeedle(event.target.value)
+            },
+            style: { ...input, fontSize: '0.8em', padding: '4px 8px' },
+          }),
+          ...shown.map((entry) =>
+            LI(
+              'button',
+              {
+                key: entry.key,
+                type: 'button',
+                role: 'option',
+                'aria-selected': entry.key === value,
+                'data-project-key': entry.key,
+                onClick: () => {
+                  onPick(entry.key)
+                  setOpen(false)
+                },
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  border: 'none',
+                  background: entry.key === value ? C.accentSoft : 'transparent',
+                  color: entry.key === value ? C.accent : C.text,
+                  borderRadius: 7,
+                  padding: '5px 8px',
+                  fontSize: '0.8em',
+                  cursor: 'pointer',
+                  font: 'inherit',
+                  textAlign: 'left',
+                  width: '100%',
+                },
+              },
+              LI('span', { key: 'dot', style: { width: 6, height: 6, flex: 'none', borderRadius: 999, background: projectTone(entry.key) } }),
+              LI('span', { key: 'key', style: { flex: 'none', fontWeight: 600 } }, entry.key),
+              LI(
+                'span',
+                {
+                  key: 'name',
+                  style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: C.textFaint },
+                },
+                entry.name,
+              ),
+            ),
+          ),
+          matches.length === 0
+            ? LI('div', { key: 'none', style: { fontSize: '0.78em', color: C.textFaint, padding: '4px 2px' } }, '没有匹配的项目。')
+            : null,
+          matches.length > MAX_ROWS
+            ? LI(
+                'div',
+                { key: 'more', style: { fontSize: '0.72em', color: C.textFaint, padding: '2px 2px 0' } },
+                `还有 ${String(matches.length - MAX_ROWS)} 个，用上面的搜索框收窄`,
+              )
+            : null,
+        )
+      : null,
+  )
+}
+
+/**
+ * The sprint catalogue as a searchable picker.
+ *
+ * A chip per sprint is wrong on a real site: RD003 alone offers 160 of them,
+ * with names like "镇海炼化冲刺15.5" that differ by a few characters. So the
+ * whole catalogue lives behind one control that filters as you type, and the
+ * row shows only the CURRENT selection.
+ *
+ * Deliberately a listbox built from buttons rather than a native `<select>`:
+ * the options carry a state dot and a count, neither of which a `<select>` can
+ * render, and the panel's theming would not reach the browser's popup.
+ */
+function SprintPicker({
+  options,
+  value,
+  loading,
+  error,
+  project,
+  onPick,
+}: {
+  options: readonly SprintChoice[]
+  /** The current selection, in `sprint`-state form (`id:<id>`). */
+  value: string
+  loading: boolean
+  error: string | undefined
+  /** The project whose catalogue this is, for the empty state's message. */
+  project: string
+  /** undefined clears the filter. */
+  onPick: (id: string | undefined) => void
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false)
+  const [needle, setNeedle] = React.useState('')
+  const box = React.useRef<HTMLDivElement | undefined>(undefined)
+
+  const selectedId = value.startsWith(SPRINT_ID_PREFIX) ? value.slice(SPRINT_ID_PREFIX.length) : undefined
+  const selected = selectedId === undefined ? undefined : options.find((entry) => entry.id === selectedId)
+
+  // Close on an outside click and on Escape: a listbox left open over the board
+  // covers the very cards it filters.
+  React.useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent): void => {
+      const node = box.current
+      if (node !== undefined && event.target instanceof Node && node.contains(event.target)) return
+      setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const term = needle.trim().toLowerCase()
+  const matches =
+    term === ''
+      ? options
+      : options.filter((entry) => `${entry.name} ${entry.id}`.toLowerCase().includes(term))
+  // The list is capped so a 160-sprint project does not paint 160 rows: the
+  // search box is the way to reach the rest, and the footer says how many are
+  // hidden instead of silently truncating.
+  const MAX_ROWS = 40
+  const shown = matches.slice(0, MAX_ROWS)
+
+  return LI(
+    'div',
+    { ref: box, 'data-dsh-jira-sprint-picker': '1', style: { position: 'relative', display: 'inline-flex' } },
+    LI(
+      'button',
+      {
+        key: 'toggle',
+        type: 'button',
+        'aria-haspopup': 'listbox',
+        'aria-expanded': open,
+        'aria-pressed': selectedId !== undefined,
+        title:
+          selected === undefined
+            ? '按名称选择一个冲刺（服务端筛选）'
+            : `${selected.name}（${sprintStateLabel(selected.state)}）—— 服务端筛选：sprint = ${selected.id}`,
+        onClick: () => {
+          setOpen(!open)
+          setNeedle('')
+        },
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          border: `1px solid ${selected === undefined ? C.border : C.accent}`,
+          background: selected === undefined ? 'transparent' : C.accentSoft,
+          color: selected === undefined ? C.textDim : C.accent,
+          borderRadius: 999,
+          padding: '3px 10px',
+          fontSize: '0.8em',
+          fontWeight: selected === undefined ? 400 : 600,
+          cursor: 'pointer',
+          font: 'inherit',
+          maxWidth: 260,
+        },
+      },
+      LI(
+        'span',
+        {
+          key: 'label',
+          style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+        },
+        selected === undefined
+          ? loading
+            ? '冲刺…'
+            : '具体冲刺'
+          : `${sprintStateLabel(selected.state) === '进行中' ? '● ' : ''}${selected.name}`,
+      ),
+      selected !== undefined
+        ? LI(
+            'span',
+            {
+              key: 'clear',
+              role: 'presentation',
+              title: '清除冲刺筛选',
+              onClick: (event: React.MouseEvent) => {
+                // The toggle must not also open the list on the way out.
+                event.stopPropagation()
+                onPick(undefined)
+              },
+              style: { opacity: 0.7, cursor: 'pointer', paddingLeft: 2 },
+            },
+            '×',
+          )
+        : LI('span', { key: 'caret', style: { opacity: 0.6 } }, '▾'),
+    ),
+    open
+      ? LI(
+          'div',
+          {
+            key: 'list',
+            role: 'listbox',
+            style: {
+              position: 'absolute',
+              top: 'calc(100% + 6px)',
+              left: 0,
+              zIndex: 20,
+              width: 300,
+              maxHeight: 320,
+              overflowY: 'auto',
+              border: `1px solid ${C.border}`,
+              borderRadius: 10,
+              // Opaque, not the shell's translucent menu layer: this list opens
+              // straight over issue cards, and translucent read as ghost text.
+              background: C.pickerList,
+              boxShadow: '0 10px 28px rgba(0,0,0,.22)',
+              padding: 8,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            },
+          },
+          LI('input', {
+            key: 'search',
+            value: needle,
+            placeholder: '按名称筛选冲刺…',
+            spellCheck: false,
+            autoFocus: true,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+              setNeedle(event.target.value)
+            },
+            style: { ...input, fontSize: '0.8em', padding: '4px 8px' },
+          }),
+          error !== undefined
+            ? LI('div', { key: 'err', style: { fontSize: '0.74em', color: TONE_COLOR['bad'] } }, `读取冲刺列表失败：${error}`)
+            : null,
+          loading
+            ? LI('div', { key: 'load', style: { fontSize: '0.78em', color: C.textFaint, padding: '4px 2px' } }, '读取中…')
+            : null,
+          options.length === 0 && !loading
+            ? LI(
+                'div',
+                { key: 'none', style: { fontSize: '0.78em', color: C.textFaint, padding: '4px 2px' } },
+                project === ''
+                  ? '当前查询没有确定项目，无法列出冲刺。'
+                  : `项目 ${project} 没有可选的冲刺。`,
+              )
+            : null,
+          ...shown.map((entry) =>
+            LI(
+              'button',
+              {
+                key: entry.id,
+                type: 'button',
+                role: 'option',
+                'aria-selected': entry.id === selectedId,
+                'data-sprint-id': entry.id,
+                onClick: () => {
+                  onPick(entry.id === selectedId ? undefined : entry.id)
+                  setOpen(false)
+                },
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  border: 'none',
+                  background: entry.id === selectedId ? C.accentSoft : 'transparent',
+                  color: entry.id === selectedId ? C.accent : C.text,
+                  borderRadius: 7,
+                  padding: '5px 8px',
+                  fontSize: '0.8em',
+                  cursor: 'pointer',
+                  font: 'inherit',
+                  textAlign: 'left',
+                  width: '100%',
+                },
+              },
+              LI('span', {
+                key: 'dot',
+                style: {
+                  width: 6,
+                  height: 6,
+                  flex: 'none',
+                  borderRadius: 999,
+                  background:
+                    entry.state === 'active'
+                      ? TONE_COLOR['ok']
+                      : entry.state === 'future'
+                        ? TONE_COLOR['pending']
+                        : C.textFaint,
+                },
+              }),
+              LI(
+                'span',
+                {
+                  key: 'name',
+                  style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                },
+                entry.name,
+              ),
+              LI(
+                'span',
+                { key: 'meta', style: { flex: 'none', fontSize: '0.9em', color: C.textFaint } },
+                entry.count > 0 ? `${String(entry.count)} 张` : sprintStateLabel(entry.state),
+              ),
+            ),
+          ),
+          matches.length === 0 && options.length > 0
+            ? LI('div', { key: 'nomatch', style: { fontSize: '0.78em', color: C.textFaint, padding: '4px 2px' } }, '没有匹配的冲刺。')
+            : null,
+          matches.length > MAX_ROWS
+            ? LI(
+                'div',
+                { key: 'more', style: { fontSize: '0.72em', color: C.textFaint, padding: '2px 2px 0' } },
+                `还有 ${String(matches.length - MAX_ROWS)} 个，用上面的搜索框收窄`,
+              )
+            : null,
+        )
+      : null,
   )
 }
 
@@ -1879,6 +3391,17 @@ function IssueCard({
       issue.projectKey !== undefined
         ? LI(Pill as React.ElementType, { key: 'project', tone: project, outline: true }, issue.projectKey)
         : null,
+      // The active sprint, when the issue has one. Only the FIRST entry matters
+      // on a card: the card is 276px wide, and the older sprints an issue was
+      // carried through are history rather than something to filter by from
+      // here — they stay in the drawer.
+      sprintBadge(issue) !== undefined
+        ? LI(
+            Pill as React.ElementType,
+            { key: 'sprint', title: sprintBadge(issue)?.title },
+            sprintBadge(issue)?.label,
+          )
+        : null,
       issue.status.categoryKey === 'done'
         ? LI(Pill as React.ElementType, { key: 'state', tone: accent }, '已完成')
         : null,
@@ -1892,35 +3415,49 @@ function IssueCard({
 function IssueDrawer({
   issue,
   promptTemplate,
+  seeded,
   onClose,
   onRefreshBoard,
   onNotify,
 }: {
   issue: BoardIssue
   promptTemplate: string
+  /**
+   * A detail the caller already fetched for this exact issue.
+   *
+   * A key lookup answers with the same document the drawer reads, so opening
+   * the drawer on it must not ask again — and while it exists the drawer has no
+   * "读取中…" state to show, because it is already filled in.
+   */
+  seeded?: DetailPayload | undefined
   onClose: () => void
   onRefreshBoard: () => void
   onNotify: (message: string, tone: 'ok' | 'bad') => void
 }): React.ReactElement {
   const services = useHandover()
-  const [detail, setDetail] = React.useState<DetailPayload | undefined>(undefined)
+  const [detail, setDetail] = React.useState<DetailPayload | undefined>(seeded)
   const [transitions, setTransitions] = React.useState<BoardTransition[] | undefined>(undefined)
-  const [loading, setLoading] = React.useState(true)
+  const [loading, setLoading] = React.useState(seeded === undefined)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | undefined>(undefined)
   const [copied, setCopied] = React.useState(false)
 
   React.useEffect(() => {
     let live = true
-    setLoading(true)
+    setLoading(seeded === undefined)
     setError(undefined)
-    setDetail(undefined)
+    setDetail(seeded)
     setTransitions(undefined)
     const key = encodeURIComponent(issue.key)
-    // The drawer opens on data the board already has, so both requests run
-    // together: a slow description must not hold back the transition menu.
+    // The description is skipped when the caller already has it: only the
+    // transitions still need the server. Both requests otherwise run together,
+    // so a slow description must not hold back the transition menu.
+    const description: Promise<DetailPayload | undefined> =
+      seeded === undefined
+        ? api<DetailPayload>(`/issue/${key}`, 'GET')
+        : Promise.resolve(undefined)
     Promise.all([
-      api<DetailPayload>(`/issue/${key}`, 'GET'),
+      description,
       api<TransitionsPayload>(`/issue/${key}/transitions`, 'GET').catch(
         (reason: unknown): TransitionsPayload => ({
           ok: false,
@@ -1931,7 +3468,7 @@ function IssueDrawer({
     ])
       .then(([nextDetail, nextTransitions]) => {
         if (!live) return
-        setDetail(nextDetail)
+        if (nextDetail !== undefined) setDetail(nextDetail)
         setTransitions(nextTransitions.transitions)
         if (!nextTransitions.ok) setError(nextTransitions.error ?? '读取可用流转失败')
       })
@@ -1944,7 +3481,7 @@ function IssueDrawer({
     return () => {
       live = false
     }
-  }, [issue.key])
+  }, [issue.key, seeded])
 
   const runTransition = React.useCallback(
     async (transition: BoardTransition): Promise<void> => {
@@ -1994,6 +3531,18 @@ function IssueDrawer({
   if (shown.assignee !== undefined) metaChips.push(LI('span', { key: 'a', style: { ...chip, cursor: 'default' } }, shown.assignee))
   if (shown.projectKey !== undefined) {
     metaChips.push(LI('span', { key: 'j', style: { ...chip, cursor: 'default' } }, shown.projectName ?? shown.projectKey))
+  }
+  // The drawer is the place the whole picture belongs: every sprint the issue
+  // carries, in state order, because a card only has room for the newest one.
+  for (const [index, sprint] of (shown.sprints ?? []).entries()) {
+    const state = sprint.state === 'active' ? '进行中' : sprint.state === 'future' ? '未开始' : sprint.state === 'closed' ? '已结束' : ''
+    metaChips.push(
+      LI(
+        'span',
+        { key: `s${String(index)}`, style: { ...chip, cursor: 'default' } },
+        `冲刺 ${sprint.name}${state === '' ? '' : ` · ${state}`}`,
+      ),
+    )
   }
   if (shown.updated !== undefined) {
     metaChips.push(LI('span', { key: 'u', style: { ...chip, cursor: 'default' } }, `更新于 ${relativeTime(shown.updated)}`))
@@ -2169,33 +3718,212 @@ function IssueDrawer({
   )
 }
 
+// ---------------------------------------------------------------------------
+// Board memory between openings
+// ---------------------------------------------------------------------------
+
+/**
+ * What the board remembers after the shell unmounts it.
+ *
+ * The layout mounts exactly one `main` entry at a time (`renderSlot('main', {},
+ * { entryKey })`), so selecting another panel or opening Settings tears this
+ * component down and its React state is gone. Without something outside the
+ * component every reopening is an empty board plus a Jira round-trip — the
+ * panel "reloads" for no reason the user can see. The snapshot keeps the
+ * payload and the view that was on screen, so opening it again is a paint.
+ *
+ * Deliberately module-scoped rather than persisted: it dies with the page, so a
+ * reload always starts from the host instead of a stale file. It holds no token
+ * and no prompt, only what the board was showing.
+ */
+interface BoardSnapshot {
+  /** The payload the last successful read returned. */
+  board?: BoardPayload
+  /** When that read landed, for the freshness window. */
+  updatedAt?: number
+  /** The JQL that payload answers, so another query cannot reuse it. */
+  jql: string
+  /** The deployment's pinned query at capture time, to notice a config edit. */
+  configJql: string
+  viewId: string
+  override?: string
+  project: string
+  category: string
+  /** The sprint filter, as `sprintClauseOf` understands it. */
+  sprint: string
+  mine: boolean
+  query: string
+  /** The full project catalogue at capture time, so a reopen need not refetch. */
+  projects?: readonly BoardProject[]
+  /** When that catalogue landed. */
+  projectsAt?: number
+}
+
+/**
+ * How long a restored project catalogue is trusted without asking the host.
+ *
+ * A project list changes when somebody creates one, not minute to minute — an
+ * hour of reuse is exactly the "初始化读取后不再重载" behaviour. The explicit
+ * 刷新 button still re-reads immediately.
+ */
+const PROJECT_CACHE_TTL = 3_600_000
+
+/** How long a restored board is trusted without asking the host again. */
+const BOARD_CACHE_TTL = 60_000
+
+/** Whether a snapshot carries a project catalogue still worth painting. */
+function canReuseProjects(snapshot: BoardSnapshot | undefined, now: number): boolean {
+  const at = snapshot?.projectsAt
+  return snapshot?.projects !== undefined && at !== undefined && now - at < PROJECT_CACHE_TTL
+}
+
+let boardSnapshot: BoardSnapshot | undefined
+
+function blankSnapshot(): BoardSnapshot {
+  return {
+    jql: '',
+    configJql: '',
+    viewId: VIEWS[0].id,
+    // '' means "no project chosen yet", which is the moment before `GET
+    // /projects` answers. The panel never asks for a board until it is set.
+    project: '',
+    category: 'all',
+    sprint: SPRINT_ALL,
+    mine: false,
+    query: '',
+  }
+}
+
+function readBoardSnapshot(): BoardSnapshot | undefined {
+  return boardSnapshot
+}
+
+/** Merge a change into the snapshot: it is one object, not an event log. */
+function writeBoardSnapshot(patch: Partial<BoardSnapshot>): void {
+  boardSnapshot = { ...(boardSnapshot ?? blankSnapshot()), ...patch }
+}
+
+/**
+ * Whether the snapshot holds this query's payload, fresh or not.
+ *
+ * The freshness half is `canReuseBoard`'s: a matching but old snapshot is
+ * painted and revalidated in the background instead of being thrown away.
+ */
+function snapshotAnswers(snapshot: BoardSnapshot | undefined, jql: string): boolean {
+  return snapshot !== undefined && snapshot.board !== undefined && snapshot.jql === jql
+}
+
+/**
+ * Whether a snapshot may be painted as-is instead of triggering a read.
+ *
+ * A cached board is reusable when it ANSWERS THIS QUERY and is younger than one
+ * poll period; anything else is a board the panel would have to replace the
+ * moment it appeared, which is the reload this avoids.
+ */
+function canReuseBoard(snapshot: BoardSnapshot | undefined, jql: string, now: number): boolean {
+  if (snapshot === undefined || !snapshotAnswers(snapshot, jql)) return false
+  const at = snapshot.updatedAt
+  return at !== undefined && now - at < BOARD_CACHE_TTL
+}
+
+/**
+ * What opening the panel should do with the snapshot.
+ *
+ * - `paint`      — show it and ask the host nothing; the next poll would return
+ *                  this same answer.
+ * - `revalidate` — show it, then ask in the background: old, but still the
+ *                  answer to this query, so blanking for it would be a lie.
+ * - `read`       — nothing worth showing; the panel has to wait for the host.
+ *
+ * Pure, and exported so the regression harness can pin all three outcomes; that
+ * mapping is the whole "it does not reload every time" behaviour.
+ */
+type Opening = 'paint' | 'revalidate' | 'read'
+
+function openingPlan(snapshot: BoardSnapshot | undefined, jql: string, now: number): Opening {
+  if (canReuseBoard(snapshot, jql, now)) return 'paint'
+  return snapshotAnswers(snapshot, jql) ? 'revalidate' : 'read'
+}
+
+/**
+ * The query a view id plus the server-side selections produces.
+ *
+ * Order matters only in that every fold inserts before a trailing `ORDER BY`.
+ * The project comes FIRST: it is the board's scope, so it must be in force
+ * before the other constraints are folded into the same query. The sprint
+ * clause is added last so a hand-written query's own sprint constraint still
+ * wins the `sprintFilterOf` read-back.
+ */
+function jqlForView(
+  viewId: string,
+  override: string | undefined,
+  project: string,
+  mine: boolean,
+  sprint = SPRINT_ALL,
+): string {
+  const view = VIEWS.find((entry) => entry.id === viewId) ?? VIEWS[0]
+  return withSprint(withMine(withProject(override ?? view.jql, project), mine), sprint)
+}
+
 /**
  * The board panel: the keyed `main` cell addressed by the sidebar icon.
  *
- * Filtering is CLIENT-side on purpose. The server's answer is bounded (the
- * configured page size), and refining what is already in hand is instant, works
- * with a query the user typed by hand, and costs no round-trips. Only the
- * bounded JQL view itself goes to the server.
+ * A project is always selected: the row offers every project the authorization
+ * can see and no "全部" entry, because the scope has to be one project for the
+ * issue count beside it to mean anything, and because "all projects" was
+ * exactly the query whose first page hid the project the user was looking for.
+ *
+ * Filtering by STATUS and by search text stays CLIENT-side: the whole project is
+ * already in hand, so refining it is instant and costs no round-trips. The
+ * project, the sprint and "assigned to me" are SERVER-side, because each one
+ * changes WHICH issues are read.
  */
 function JiraBoardPanel(): React.ReactElement {
   const services = useHandover()
   const { payload: status } = useStatus()
+  const panel = usePanelPrefs()
   const promptTemplate = status?.board.promptTemplate ?? ''
   const configJql = status?.board.jql ?? ''
+  /** The host has answered, so `configJql` is a real value rather than ''. */
+  const hostReady = status !== undefined
 
-  const [board, setBoard] = React.useState<BoardPayload | undefined>(undefined)
+  // What the previous opening left behind. Read once: it is the starting
+  // paint, not something this render keeps following.
+  const snapshot = React.useMemo(readBoardSnapshot, [])
+  const restored =
+    snapshot === undefined ||
+    snapshot.jql !== jqlForView(snapshot.viewId, snapshot.override, snapshot.project, snapshot.mine, snapshot.sprint)
+      ? undefined
+      : snapshot
+
+  const [board, setBoard] = React.useState<BoardPayload | undefined>(restored?.board)
   const [error, setError] = React.useState<string | undefined>(undefined)
-  const [loading, setLoading] = React.useState(true)
-  const [override, setOverride] = React.useState<string | undefined>(undefined)
+  const [loading, setLoading] = React.useState(restored?.board === undefined)
+  const [override, setOverride] = React.useState<string | undefined>(restored?.override)
   /** What the JQL box shows while it is being edited. */
   const [jqlDraft, setJqlDraft] = React.useState('')
   const [editingJql, setEditingJql] = React.useState(false)
-  const [viewId, setViewId] = React.useState<string>(VIEWS[0].id)
-  const [project, setProject] = React.useState('all')
-  const [category, setCategory] = React.useState('all')
+  const [viewId, setViewId] = React.useState<string>(restored?.viewId ?? VIEWS[0].id)
+  /**
+   * The selected project key. NEVER `'all'`: the board always reads exactly one
+   * project, so the count beside the chip is that project's count rather than
+   * the first page of a site-wide query. Empty means "not chosen yet", which
+   * only happens for the moment before the project list arrives.
+   */
+  const [project, setProject] = React.useState<string>(
+    // `'all'` was the old "no project selected" sentinel; a restored snapshot
+    // from before this change carries it, so it is read as "not chosen yet".
+    restored?.project === undefined || restored.project === 'all' ? '' : restored.project,
+  )
+  /** Every project the authorization can see, for the row. */
+  const [projectList, setProjectList] = React.useState<readonly BoardProject[]>([])
+  const [projectListError, setProjectListError] = React.useState<string | undefined>(undefined)
+  const [category, setCategory] = React.useState<string>(restored?.category ?? 'all')
+  /** Sprint filter: a SERVER-side constraint, like "assigned to me". */
+  const [sprint, setSprint] = React.useState(restored?.sprint ?? SPRINT_ALL)
   /** "Assigned to me": a SERVER-side constraint, not a client-side chip. */
-  const [mine, setMine] = React.useState(false)
-  const [query, setQuery] = React.useState('')
+  const [mine, setMine] = React.useState(restored?.mine ?? false)
+  const [query, setQuery] = React.useState(restored?.query ?? '')
   const [selected, setSelected] = React.useState<string | undefined>(undefined)
   /** Multi-selection, by issue key. Empty means "no selection mode". */
   const [checked, setChecked] = React.useState<readonly string[]>([])
@@ -2204,11 +3932,24 @@ function JiraBoardPanel(): React.ReactElement {
   const [menu, setMenu] = React.useState<{ x: number; y: number; keys: readonly string[] } | undefined>(undefined)
   const [dragging, setDragging] = React.useState<string | undefined>(undefined)
   const [notice, setNotice] = React.useState<{ message: string; tone: 'ok' | 'bad' } | undefined>(undefined)
-  const [updatedAt, setUpdatedAt] = React.useState<number | undefined>(undefined)
+  const [updatedAt, setUpdatedAt] = React.useState<number | undefined>(restored?.updatedAt)
+  /**
+   * An issue fetched by key, because the loaded page cannot contain it.
+   *
+   * The drawer opens on a lookup, and its own `GET /issue/<key>` would be a
+   * second read of the same document the lookup just fetched — so the detail
+   * comes back with it, and the drawer starts already filled in.
+   */
+  const [resolved, setResolved] = React.useState<{ issue: BoardIssue; description: string } | undefined>(undefined)
+  /** Whether a key lookup is in flight, so the box can say so. */
+  const [resolving, setResolving] = React.useState(false)
+  const resolvedFor = React.useRef<string | undefined>(undefined)
   const mounted = React.useRef(true)
   const sequence = React.useRef(0)
   /** The configured JQL has been installed once, and only once. */
   const seeded = React.useRef(false)
+  /** The opening decision is made; later runs are real query changes. */
+  const opened = React.useRef(false)
   // Re-read the workspace/session lists while a menu is open, so a session that
   // finishes underneath it does not get labelled as running.
   const { choices } = useWorkspaceChoices(menu !== undefined)
@@ -2224,47 +3965,211 @@ function JiraBoardPanel(): React.ReactElement {
   // view selector starts on "全部" so its highlight does not claim a view whose
   // query is not the one in force. Otherwise the bounded "work in flight" view
   // is the default, because a long backlog buries the issues anyone reads.
+  //
+  // A restored snapshot supersedes both: it already carries the view the user
+  // was reading. The one thing it must not do is outlive an edit to the pinned
+  // query, so a changed `board.jql` drops it and starts from the config.
   React.useEffect(() => {
     if (seeded.current || status === undefined) return
     seeded.current = true
+    if (snapshot !== undefined && snapshot.configJql !== configJql) {
+      writeBoardSnapshot({ ...blankSnapshot(), configJql })
+      setBoard(undefined)
+      setUpdatedAt(undefined)
+      setOverride(configJql.trim() === '' ? undefined : configJql)
+      setViewId(configJql.trim() === '' ? VIEWS[0].id : 'all')
+      return
+    }
+    if (restored !== undefined) return
     if (configJql.trim() !== '') {
       setOverride(configJql)
       setViewId('all')
     }
-  }, [status, configJql])
+  }, [status, configJql, snapshot, restored])
 
   const activeView = VIEWS.find((view) => view.id === viewId) ?? VIEWS[0]
-  const effectiveJql = React.useMemo(() => withMine(override ?? activeView.jql, mine), [override, activeView, mine])
+  const effectiveJql = React.useMemo(
+    () => withSprint(withMine(withProject(override ?? activeView.jql, project), mine), sprint),
+    [override, activeView, project, mine, sprint],
+  )
 
   React.useEffect(() => {
     if (!editingJql) setJqlDraft(effectiveJql)
   }, [effectiveJql, editingJql])
 
-  const refresh = React.useCallback(async (): Promise<void> => {
-    const ticket = (sequence.current += 1)
-    setLoading(true)
+  /**
+   * Read the board.
+   *
+   * `quiet` is the revalidation path: a restored board stays on screen while a
+   * newer one is fetched, so a reopen never blanks and never shows a spinner
+   * for data that is already legible. A visible read (first open, project or
+   * view change, the poll, the Refresh button) still sets `loading`.
+   *
+   * A read is REFUSED while no project is selected. The project is the board's
+   * scope, and fetching the un-scoped query would answer with a site-wide page
+   * that the panel then has to filter — exactly the behaviour that hid a project
+   * behind whichever issues happened to sort first.
+   */
+  const refresh = React.useCallback(
+    async (options?: { quiet?: boolean }): Promise<void> => {
+      if (project.trim() === '') {
+        setLoading(false)
+        return
+      }
+      const quiet = options?.quiet === true
+      const ticket = (sequence.current += 1)
+      if (!quiet) setLoading(true)
+      try {
+        const suffix = effectiveJql.trim() === '' ? '' : `?jql=${encodeURIComponent(effectiveJql)}`
+        const next = await api<BoardPayload>(`/board${suffix}`, 'GET')
+        // Only the newest request may write state: a slow early response must
+        // not overwrite a newer one.
+        if (mounted.current && ticket === sequence.current) {
+          const at = Date.now()
+          setBoard(next)
+          setError(undefined)
+          setUpdatedAt(at)
+          // The snapshot is what a later opening paints, so it is stored
+          // together with the query it answers: a payload and its JQL are one
+          // fact, and mixing them up would show the wrong board.
+          writeBoardSnapshot({ board: next, updatedAt: at, jql: effectiveJql })
+        }
+      } catch (reason) {
+        if (mounted.current && ticket === sequence.current) {
+          setError(reason instanceof Error ? reason.message : String(reason))
+        }
+      } finally {
+        if (mounted.current && ticket === sequence.current) setLoading(false)
+      }
+    },
+    [effectiveJql, project],
+  )
+
+  // The project row is the board's SCOPE selector, so it is read from the site
+  // itself — `GET /projects` pages to exhaustion — rather than derived from
+  // whatever the last query happened to return. Deriving it was what made a
+  // project the user works in every day simply absent from the row.
+  //
+  // Read once per opening and re-read only on an explicit refresh: a project
+  // list changes when somebody creates a project, not between polls.
+  //
+  // The preferences are read through a REF rather than a dependency: opening a
+  // project writes to `recentProjects`, and depending on that would re-enter
+  // this callback on every click and re-fetch the whole catalogue each time.
+  const prefsRef = React.useRef(panel.value)
+  prefsRef.current = panel.value
+
+  const projectEpoch = React.useRef(0)
+  const loadProjects = React.useCallback(async (): Promise<void> => {
+    if (!hostReady) return
+    const ticket = (projectEpoch.current += 1)
     try {
-      const suffix = effectiveJql.trim() === '' ? '' : `?jql=${encodeURIComponent(effectiveJql)}`
-      const next = await api<BoardPayload>(`/board${suffix}`, 'GET')
-      // Only the newest request may write state: a slow early response must not
-      // overwrite a newer one.
-      if (mounted.current && ticket === sequence.current) {
-        setBoard(next)
-        setError(undefined)
-        setUpdatedAt(Date.now())
-      }
+      const response = await api<{ ok: boolean; projects: BoardProject[] }>('/projects', 'GET')
+      if (!mounted.current || ticket !== projectEpoch.current) return
+      const list = (response.projects ?? []).filter((entry) => typeof entry?.key === 'string')
+      setProjectList(list)
+      setProjectListError(undefined)
+      // Cache it like the board payload: a reopen paints this instead of
+      // flashing "读取项目…" again, until the TTL or an explicit refresh says so.
+      writeBoardSnapshot({ projects: list, projectsAt: Date.now() })
+      // The first answer also picks the scope. The order is "strongest statement
+      // of intent first": the query the deployment pinned, then the last project
+      // this person actually opened, then a pin, then the site's own first entry.
+      // Recency beats a pin here because a pin is "keep this handy", while the
+      // recent list is "this is what I was doing".
+      setProject((current) => {
+        if (current !== '' && list.some((entry) => entry.key === current)) return current
+        const inList = (key: string | undefined): boolean =>
+          key !== undefined && list.some((entry) => entry.key === key)
+        const pinnedInConfig = PROJECT_EQUALS_PATTERN.exec(configJql)?.[1]?.toUpperCase()
+        if (inList(pinnedInConfig)) return pinnedInConfig as string
+        const recent = prefsRef.current.recentProjects.find(inList)
+        if (recent !== undefined) return recent
+        const pinned = prefsRef.current.pinnedProjects.find(inList)
+        return pinned ?? list[0]?.key ?? ''
+      })
     } catch (reason) {
-      if (mounted.current && ticket === sequence.current) {
-        setError(reason instanceof Error ? reason.message : String(reason))
-      }
-    } finally {
-      if (mounted.current && ticket === sequence.current) setLoading(false)
+      if (!mounted.current || ticket !== projectEpoch.current) return
+      setProjectListError(reason instanceof Error ? reason.message : String(reason))
     }
-  }, [effectiveJql])
+  }, [hostReady, configJql])
 
   React.useEffect(() => {
+    // A reopen paints the cached catalogue — the same contract the board payload
+    // keeps, so the row does not blank into "读取项目…" on every opening. Inside
+    // the TTL the host is asked NOTHING; past it, what is cached still paints
+    // while a quiet revalidation runs underneath.
+    const snapshot = readBoardSnapshot()
+    if (snapshot?.projects !== undefined) {
+      setProjectList([...snapshot.projects])
+      if (canReuseProjects(snapshot, Date.now())) return
+    }
+    void loadProjects()
+  }, [loadProjects])
+
+  /**
+   * Open one project and remember it as the most recent.
+   *
+   * The recency write is fire-and-forget: a failed preference write must not
+   * stop the board from switching, and the in-memory publish already happened so
+   * the row reorders immediately either way.
+   */
+  const openProject = React.useCallback((key: string): void => {
+    setProject(key)
+    const next = pushRecent(prefsRef.current.recentProjects, key)
+    publishPanelPrefs({ ...prefsRef.current, recentProjects: next }, true)
+    void saveRecentProjects(next).catch(() => undefined)
+  }, [])
+
+  // Opening the panel: paint what is remembered, then decide whether the host
+  // is worth asking. A snapshot younger than one poll period holds exactly what
+  // the next tick would return, so reopening inside that window costs no
+  // request at all; older than that, it stays on screen while it revalidates.
+  React.useEffect(() => {
+    if (project.trim() === '') return
+    if (!opened.current) {
+      opened.current = true
+      const plan = openingPlan(snapshot, effectiveJql, Date.now())
+      if (plan === 'paint') return
+      if (plan === 'revalidate') {
+        void refresh({ quiet: true })
+        return
+      }
+    }
     void refresh()
-  }, [refresh])
+  }, [refresh, effectiveJql, project, snapshot])
+
+  // The filters are client-side, so they change without a fetch. Mirroring them
+  // into the snapshot is what makes a reopen land on the same slice of the
+  // board instead of back at "everything". `sprint` is in here even though it
+  // is server-side: it is still part of what the user was looking at.
+  React.useEffect(() => {
+    writeBoardSnapshot({ viewId, override, project, category, sprint, mine, query })
+  }, [viewId, override, project, category, sprint, mine, query])
+
+  // The pinned query is only meaningful once the host has answered; writing its
+  // '' placeholder first would look like a config change on the next opening.
+  React.useEffect(() => {
+    if (!hostReady) return
+    writeBoardSnapshot({ configJql })
+  }, [configJql, hostReady])
+
+  // A board painted from the snapshot must not outlive the account it came
+  // from: `idle` means there is no account at all, and a different or
+  // mismatched site is a board belonging to somebody else's Jira. Either way
+  // the panel returns to the connect prompt instead of vouching for numbers it
+  // cannot stand behind. Transitional and `error` states keep their board — the
+  // badge is the honest signal there, and wiping would also lose a usable view.
+  React.useEffect(() => {
+    if (status === undefined || board === undefined) return
+    const signedOut = status.status === 'idle'
+    const otherSite =
+      status.siteMismatch || (status.site !== undefined && board.site !== undefined && status.site !== board.site)
+    if (!signedOut && !otherSite) return
+    setBoard(undefined)
+    setUpdatedAt(undefined)
+    writeBoardSnapshot({ board: undefined, updatedAt: undefined })
+  }, [status, board])
 
   // A slow poll, skipped while the page is hidden. The board mirrors a remote
   // system, so an interval is the whole sync story — there is no push channel.
@@ -2339,33 +4244,145 @@ function JiraBoardPanel(): React.ReactElement {
     }
   }, [])
 
-  const issues = React.useMemo(() => board?.issues ?? [], [board])
+  const loaded = React.useMemo(() => board?.issues ?? [], [board])
 
   /**
-   * The projects present in the current view.
+   * The issue a key lookup brought in, when the page cannot contain it.
    *
-   * Derived from what was actually loaded rather than from the project list:
-   * offering a project that this query returns nothing for is a dead end, and
-   * the counts make the choice self-explanatory.
+   * Folded into `issues` below so everything downstream — the status columns,
+   * the project chips, the selection and the hand-over — treats it like any
+   * other card. Keeping it in a parallel list would have made "open the drawer"
+   * work while every action on that issue silently did nothing.
    */
-  const projects = React.useMemo(() => {
-    const seen = new Map<string, { key: string; name: string; count: number }>()
-    for (const issue of issues) {
-      const key = issue.projectKey
-      if (key === undefined) continue
-      const entry = seen.get(key)
-      if (entry === undefined) seen.set(key, { key, name: issue.projectName ?? key, count: 1 })
-      else entry.count += 1
+  const pinned =
+    resolved !== undefined && !loaded.some((issue) => issue.key === resolved.issue.key) ? resolved.issue : undefined
+
+  const issues = React.useMemo(
+    () => (pinned === undefined ? loaded : [pinned, ...loaded]),
+    [loaded, pinned],
+  )
+
+  /**
+   * The detail the lookup already fetched, handed to the drawer it opens.
+   *
+   * `/issue/<key>` is exactly what the drawer would ask for, so without this the
+   * one gesture "look this key up" would cost two identical reads and the drawer
+   * would still show "读取中…" after the card was already on screen.
+   */
+  const seededDetail = React.useMemo<DetailPayload | undefined>(
+    () =>
+      resolved === undefined
+        ? undefined
+        : { ok: true, issue: resolved.issue, description: resolved.description },
+    [resolved],
+  )
+
+  /**
+   * The projects the ROW shows: pinned, recent, and the current one.
+   *
+   * The site lists 148 projects, so a chip per project is not a row — it is a
+   * wall nobody can scan. Jira's own sidebar solves this the same way: a short
+   * "recent" strip plus a way to search the rest. So the row holds
+   *
+   *   1. every PINNED project, in pin order (deliberate intent outranks history),
+   *   2. then the recently-opened projects, newest first,
+   *   3. plus the current selection, which must be visible even when it is
+   *      neither pinned nor recent (it was just picked from the catalogue).
+   *
+   * Everything else is reachable through the "更多项目" picker beside the row,
+   * which searches the complete list. Only the SELECTED chip carries a count: it
+   * is the one project whose whole issue set the board has actually read.
+   */
+  const pinnedProjects = panel.value.pinnedProjects
+  const recentProjects = panel.value.recentProjects
+
+  const byKey = React.useMemo(() => {
+    const map = new Map<string, BoardProject>()
+    for (const entry of projectList) map.set(entry.key, entry)
+    return map
+  }, [projectList])
+
+  /** The keys the row shows, in row order, deduplicated. */
+  const rowKeys = React.useMemo(() => {
+    const keys: string[] = []
+    const push = (key: string): void => {
+      if (key !== '' && !keys.includes(key)) keys.push(key)
     }
-    return [...seen.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
-  }, [issues])
+    for (const key of pinnedProjects) push(key)
+    for (const key of recentProjects) push(key)
+    push(project)
+    return keys
+  }, [pinnedProjects, recentProjects, project])
+
+  /** The row's entries. A project the site no longer lists is still shown by
+   *  key — a pin or a recent entry is the user's own record, and hiding it
+   *  because the list was read a moment earlier would silently drop a choice. */
+  const projects = React.useMemo(
+    () => rowKeys.map((key) => byKey.get(key) ?? { key, name: key, updated: undefined }),
+    [rowKeys, byKey],
+  )
+
+  /**
+   * Which project's sprint catalogue to list.
+   *
+   * Always the selected project: the board reads exactly one, so its sprint
+   * catalogue is the one the row can offer. `project` is never `'all'`, which is
+   * what makes this a straight read instead of a guess.
+   */
+  const sprintProject = project
+
+  /** The sprint catalogue for {@link sprintProject}, loaded per project. */
+  const [sprintCatalogue, setSprintCatalogue] = React.useState<SprintOption[]>([])
+  const [sprintLoading, setSprintLoading] = React.useState(false)
+  const [sprintError, setSprintError] = React.useState<string | undefined>(undefined)
+  const sprintEpoch = React.useRef(0)
+
+  React.useEffect(() => {
+    if (!hostReady || sprintProject === '') {
+      setSprintCatalogue([])
+      setSprintError(undefined)
+      return
+    }
+    const ticket = (sprintEpoch.current += 1)
+    setSprintLoading(true)
+    setSprintError(undefined)
+    void (async () => {
+      try {
+        const response = await api<{ ok: boolean; sprints: SprintOption[] }>(
+          `/sprints?project=${encodeURIComponent(sprintProject)}`,
+          'GET',
+        )
+        if (!mounted.current || ticket !== sprintEpoch.current) return
+        setSprintCatalogue(response.sprints ?? [])
+      } catch (reason) {
+        if (!mounted.current || ticket !== sprintEpoch.current) return
+        // An empty catalogue is not fatal: the page's own sprints still become
+        // chips (see `sprintChoices`), so the filter stays usable and the error
+        // is a hint rather than a wall.
+        setSprintCatalogue([])
+        setSprintError(reason instanceof Error ? reason.message : String(reason))
+      } finally {
+        if (mounted.current && ticket === sprintEpoch.current) setSprintLoading(false)
+      }
+    })()
+  }, [sprintProject, hostReady])
+
+  /** The catalogue merged with the page, counts included. */
+  const sprints = React.useMemo(() => sprintChoices(sprintCatalogue, issues), [sprintCatalogue, issues])
 
   const categories = React.useMemo(() => categoryChoices(issues), [issues])
 
   const visible = React.useMemo(() => {
+    // A by-key lookup IS the answer: the board shows that one issue, without
+    // asking the chips to explain a card the loaded page never had. The page
+    // comes back the moment the lookup is put away.
+    if (pinned !== undefined) return [pinned]
     const needle = query.trim().toLowerCase()
+    // The project is NOT filtered here: it is already the JQL's scope, so every
+    // issue in hand belongs to it. Re-filtering would only matter if the server
+    // had answered with another project's issues, which would be a bug worth
+    // seeing rather than hiding behind a client-side sweep.
     return issues.filter((issue) => {
-      if (project !== 'all' && issue.projectKey !== project) return false
       if (category !== 'all' && issue.status.categoryKey !== category) return false
       if (needle !== '') {
         const haystack = `${issue.key} ${issue.summary} ${issue.projectName ?? ''}`.toLowerCase()
@@ -2373,16 +4390,112 @@ function JiraBoardPanel(): React.ReactElement {
       }
       return true
     })
-  }, [issues, project, category, query])
+  }, [issues, pinned, category, query])
 
   const columns = React.useMemo(() => groupColumns(visible), [visible])
+
+  /**
+   * Answer a search for one exact issue.
+   *
+   * Called when the search box holds a bare key or a Jira link. The issue is
+   * fetched by key, so it is found regardless of whether the current page (or
+   * the current filters) happens to contain it, and the drawer opens on it. A
+   * failure is reported in the notice rather than as the board's error, because
+   * the board itself is still perfectly readable.
+   */
+  const openKey = React.useCallback(
+    async (key: string): Promise<void> => {
+      // Already on the board: no request, just show it.
+      const held = issues.find((issue) => issue.key === key)
+      if (held !== undefined) {
+        setSelected(held.key)
+        return
+      }
+      // Already looked up: reopening the drawer costs no round-trip, which is
+      // what makes pressing Enter twice on the same key harmless.
+      if (resolvedFor.current === key) {
+        setSelected(key)
+        return
+      }
+      resolvedFor.current = key
+      setResolving(true)
+      try {
+        const detail = await api<DetailPayload>(`/issue/${encodeURIComponent(key)}`, 'GET')
+        if (!mounted.current) return
+        // A host that answers without an issue has answered nothing usable:
+        // accepting it would leave `resolved` set with no key, and the render
+        // that reads it would throw instead of reporting the failure.
+        if (detail.issue === undefined || detail.issue.key === undefined) {
+          resolvedFor.current = undefined
+          notify(`找不到 ${key}：服务端没有返回工单内容`, 'bad')
+          return
+        }
+        setResolved({ issue: detail.issue, description: detail.description ?? '' })
+        setSelected(detail.issue.key)
+        setError(undefined)
+      } catch (reason) {
+        if (!mounted.current) return
+        // Let the same key be retried once the user knows why it failed.
+        resolvedFor.current = undefined
+        notify(`找不到 ${key}：${reason instanceof Error ? reason.message : String(reason)}`, 'bad')
+      } finally {
+        if (mounted.current) setResolving(false)
+      }
+    },
+    [issues, notify],
+  )
+
+  /**
+   * Escape, and a cleared search box, drop a by-key lookup.
+   *
+   * The resolved issue is not in the board's page, so keeping its drawer open
+   * after the search that produced it is gone would leave the board showing an
+   * issue no filter on screen explains.
+   */
+  const clearSearch = React.useCallback((): void => {
+    setQuery('')
+    setResolved(undefined)
+    resolvedFor.current = undefined
+  }, [])
+
+  /**
+   * Re-derive the board's one issue from a remembered search box, once.
+   *
+   * A snapshot carries the box text, not the issue, so a repaint cannot show a
+   * by-key result the page itself does not hold. Re-running the lookup is what
+   * makes a reopened board land where the user left off; it costs one request
+   * and only when the remembered text is a key or a link. Runs after `openKey`
+   * exists, which is why it sits here rather than beside the opening effect.
+   */
+  const restoredSearch = React.useRef(false)
+  React.useEffect(() => {
+    if (restoredSearch.current) return
+    restoredSearch.current = true
+    const remembered = snapshot?.query.trim() ?? ''
+    if (remembered === '') return
+    const key = issueKeyOf(remembered)
+    if (key === undefined) return
+    // Nothing local can satisfy a key the page does not hold: ask the server.
+    resolvedFor.current = undefined
+    void openKey(key)
+  }, [snapshot, openKey])
+
   const selectedIssue = issues.find((issue) => issue.key === selected)
   const checkedIssues = React.useMemo(
     () => visible.filter((issue) => checked.includes(issue.key)),
     [visible, checked],
   )
   const connected = status?.status === 'ready'
-  const filtering = project !== 'all' || category !== 'all' || query.trim() !== '' || mine
+  /**
+   * Whether anything narrows the board BEYOND its project.
+   *
+   * The project is not counted: it is the board's scope, always set, so treating
+   * it as a filter would leave "清除筛选" permanently on screen with nothing it
+   * could sensibly clear. The sprint and "assigned to me" chips do count, even
+   * though they work through the JQL: they are filters the user turned on, and
+   * the button has to be able to turn them off.
+   */
+  const filtering = category !== 'all' || query.trim() !== '' || mine || sprint !== SPRINT_ALL
 
   const toggleChecked = React.useCallback((key: string): void => {
     anchor.current = key
@@ -2481,7 +4594,10 @@ function JiraBoardPanel(): React.ReactElement {
         '还没有连接到 Atlassian。到 设置 → Atlassian 点「连接 Atlassian」，授权后这块看板会自动出现内容。',
       )
     }
-    if (error !== undefined) {
+    // A transient failure must not throw away a board that is still on screen:
+    // with a payload in hand the header carries the warning instead of the
+    // whole panel collapsing into an error page.
+    if (error !== undefined && board === undefined) {
       return LI(
         'div',
         { key: 'error', style: { ...box, margin: 0, maxWidth: 560, borderColor: TONE_COLOR['bad'] } },
@@ -2490,14 +4606,45 @@ function JiraBoardPanel(): React.ReactElement {
       )
     }
     if (columns.length === 0) {
+      // The search box holds a key or a link, but nothing has resolved it. Ask
+      // for one click instead of claiming the issue does not exist: "no cards
+      // on this page" and "no such issue" are different answers.
+      const pendingKey = issueKeyOf(query)
+      if (pendingKey !== undefined && resolved?.issue.key !== pendingKey) {
+        return LI(
+          'div',
+          { key: 'direct', style: { ...box, margin: 0, maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 8 } },
+          LI(
+            'div',
+            { key: 'text', style: { fontSize: '0.88em' } },
+            resolving ? `正在查找 ${pendingKey}…` : `${pendingKey} 不在当前这一页（或不在当前筛选里）。`,
+          ),
+          LI(
+            'button',
+            {
+              key: 'go',
+              type: 'button',
+              disabled: resolving,
+              style: { ...chip, borderColor: C.accent, color: C.accent, alignSelf: 'flex-start', opacity: resolving ? 0.5 : 1 },
+              onClick: () => {
+                void openKey(pendingKey)
+              },
+            },
+            resolving ? '查找中…' : `按编号打开 ${pendingKey}`,
+          ),
+          LI('div', { key: 'hint', style: { fontSize: '0.76em', color: C.textFaint } }, '也可以直接回车；查找不受当前视图和每页上限限制。'),
+        )
+      }
       return LI(
         'div',
         { key: 'empty', style: { ...box, margin: 0, maxWidth: 560 } },
         loading
           ? '读取中…'
-          : filtering
-            ? '当前筛选下没有工单。放宽项目、状态或经办人，或清空搜索框。'
-            : '这个查询没有返回工单。换一个视图，或在 JQL 里放宽时间范围。',
+          : project === ''
+            ? '正在读取项目列表…'
+            : filtering
+              ? `项目 ${project} 在当前筛选下没有工单。放宽状态或经办人，或清空搜索框。`
+              : `项目 ${project} 在这个视图下没有工单。切到“全部”视图，或在 JQL 里放宽时间范围。`,
       )
     }
     return columns.map((column) =>
@@ -2509,7 +4656,7 @@ function JiraBoardPanel(): React.ReactElement {
         },
         LI(
           'div',
-          { key: 'head', style: { display: 'flex', alignItems: 'center', gap: 7, paddingLeft: 2 } },
+          { key: 'head', style: { display: 'flex', alignItems: 'center', gap: 7, paddingLeft: 2, paddingBottom: 7, borderBottom: `1px solid ${C.borderSoft}` } },
           LI('span', {
             key: 'dot',
             style: {
@@ -2548,6 +4695,7 @@ function JiraBoardPanel(): React.ReactElement {
           'div',
           {
             key: 'cards',
+            'data-dsh-jira-cards': '1',
             style: { display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', paddingRight: 2, paddingBottom: 4 },
           },
           column.issues.map((issue) =>
@@ -2591,16 +4739,57 @@ function JiraBoardPanel(): React.ReactElement {
     LI(
       'div',
       { key: 'header', style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
-      LI(Mark, { key: 'mark' }),
+      // The identity block doubles as the refresh control: it sits in the one
+      // corner that never moves, so a click re-reads the board even when the
+      // toolbar has wrapped or scrolled out of reach. `aria-pressed` is absent
+      // on purpose — the stylesheet only adds a hover fill to plain buttons.
       LI(
-        'div',
-        { key: 'titles', style: { minWidth: 0 } },
-        LI('div', { key: 'name', style: { fontSize: '1.05em', fontWeight: 600 } }, 'Jira 看板'),
+        'button',
+        {
+          key: 'identity',
+          type: 'button',
+          'data-dsh-jira-refresh': '1',
+          title: '点击刷新看板',
+          'aria-label': '刷新 Jira 看板',
+          disabled: loading,
+          onClick: () => void refresh(),
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            minWidth: 0,
+            padding: '6px 10px',
+            margin: '-6px -10px',
+            border: 'none',
+            borderRadius: 10,
+            background: 'transparent',
+            color: 'inherit',
+            textAlign: 'left',
+            font: 'inherit',
+            cursor: loading ? 'default' : 'pointer',
+          },
+        },
+        LI(Mark, { key: 'mark' }),
+        // Phrasing content only: a button may not hold block elements.
         LI(
-          'div',
-          { key: 'sub', style: { fontSize: '0.78em', color: C.textFaint } },
-          board?.site ?? status?.site ?? 'Atlassian',
-          updatedAt === undefined ? '' : ` · 更新于 ${new Date(updatedAt).toLocaleTimeString()}`,
+          'span',
+          { key: 'titles', style: { display: 'block', minWidth: 0 } },
+          LI('span', { key: 'name', style: { display: 'block', fontSize: '1.05em', fontWeight: 600 } }, 'Jira 看板'),
+          LI(
+            'span',
+            { key: 'sub', style: { display: 'block', fontSize: '0.78em', color: C.textFaint } },
+            board?.site ?? status?.site ?? 'Atlassian',
+            updatedAt === undefined ? '' : ` · 更新于 ${new Date(updatedAt).toLocaleTimeString()}`,
+            // The click has to look like it did something; the toolbar's own
+            // "刷新中…" may be off screen, and this block is where it was asked
+            // for.
+            loading ? ' · 刷新中…' : '',
+            // Silence would imply the numbers are current; a failed sync says so
+            // without replacing the board that is still readable.
+            error === undefined
+              ? ''
+              : LI('span', { key: 'stale', title: error, style: { color: TONE_COLOR['bad'] } }, ' · 同步失败'),
+          ),
         ),
       ),
       LI('span', { key: 'spacer', style: { flex: 1 } }),
@@ -2617,38 +4806,96 @@ function JiraBoardPanel(): React.ReactElement {
 
     // Toolbar. Projects lead because that is the axis a multi-project site is
     // read along; the status filter follows the same shape so the two rows scan
-    // the same way. Each chip carries its own count.
+    // the same way.
+    //
+    // There is deliberately NO "全部" chip: the board reads exactly one project,
+    // so it always has a scope, and the count beside the active chip is that
+    // project's count. Clicking the active project again is a no-op rather than
+    // a way back to "everything" — "everything" was the query whose first screen
+    // hid the project the user was looking for.
     LI(
       'div',
       { key: 'filters', style: { display: 'flex', flexDirection: 'column', gap: 6 } },
       LI(
         'div',
-        { key: 'projects', style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+        {
+          key: 'projects',
+          'data-dsh-jira-projects': '1',
+          style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+        },
         LI('span', { key: 'label', style: { fontSize: '0.74em', color: C.textFaint, minWidth: 30 } }, '项目'),
-        projects.length > 0
-          ? LI(FilterChip, {
-              key: 'all',
-              active: project === 'all',
-              label: '全部',
-              count: issues.length,
-              onClick: () => {
-                setProject('all')
+        projectListError === undefined
+          ? null
+          : LI(
+              'span',
+              {
+                key: 'project-error',
+                title: projectListError,
+                style: { fontSize: '0.74em', color: TONE_COLOR['bad'] },
               },
-            })
-          : null,
+              '项目列表读取失败',
+            ),
+        // Pinned first, then the recently-opened strip, then the current
+        // selection: see `rowKeys`. Everything else is in the picker beside the
+        // row, because 148 chips is not a row.
         projects.map((entry) =>
           LI(FilterChip, {
             key: entry.key,
             active: project === entry.key,
             label: entry.key,
-            count: entry.count,
+            // Only the selected project can promise a count: it is the one whose
+            // whole issue set the board has actually read.
+            count: project === entry.key ? issues.length : undefined,
             tone: projectTone(entry.key),
             title: entry.name,
+            pinned: pinnedProjects.includes(entry.key),
+            onPin: () => {
+              void savePinnedProjects(togglePinned(panel.value.pinnedProjects, entry.key))
+            },
             onClick: () => {
-              setProject(project === entry.key ? 'all' : entry.key)
+              openProject(entry.key)
             },
           }),
         ),
+        projectList.length > 0
+          ? LI(ProjectPicker, {
+              key: 'picker',
+              options: projectList,
+              value: project,
+              onPick: openProject,
+            })
+          : null,
+        projectList.length === 0 && projectListError === undefined
+          ? LI('span', { key: 'loading', style: { fontSize: '0.74em', color: C.textFaint } }, '读取项目…')
+          : null,
+      ),
+      // Sprint is SERVER-side, like "assigned to me": a sprint whose issues sit
+      // on another page must not read as an empty sprint. No coarse chips — the
+      // user asked for named sprints only, and "镇海炼化冲刺15.5" is the option
+      // they actually reach for — just the project's whole sprint catalogue as a
+      // searchable picker.
+      LI(
+        'div',
+        {
+          key: 'sprints',
+          'data-dsh-jira-sprints': '1',
+          style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+        },
+        LI('span', { key: 'label', style: { fontSize: '0.74em', color: C.textFaint, minWidth: 30 } }, '冲刺'),
+        // The catalogue itself, as a searchable picker rather than a chip per
+        // sprint: 160 chips would bury the board, and the user knows the name
+        // they want ("镇海炼化冲刺15.5").
+        LI(SprintPicker, {
+          key: 'picker',
+          options: sprints,
+          value: sprint,
+          loading: sprintLoading,
+          error: sprintError,
+          project: sprintProject,
+          onPick: (id: string | undefined) => {
+            setSprint(id === undefined ? SPRINT_ALL : `${SPRINT_ID_PREFIX}${id}`)
+          },
+        }),
       ),
       LI(
         'div',
@@ -2735,16 +4982,45 @@ function JiraBoardPanel(): React.ReactElement {
           ),
         ),
       ),
+      // Two behaviours in one box, on purpose. While typing it narrows the page
+      // already loaded (instant, no request); pressing Enter on a bare key or a
+      // pasted Jira link asks the SERVER for exactly that issue, so a key from
+      // another page or another view is still found instead of reading as
+      // "没有工单". The title says which is which.
       LI('input', {
         key: 'search',
         value: query,
-        placeholder: '搜索编号或标题…',
+        placeholder: '搜索编号或标题… 回车直达',
         spellCheck: false,
+        title: '输入即在本页过滤；输入 HMHP-111 或 Jira 链接后回车，按编号精确查找（不受当前页和筛选限制）',
+        'aria-busy': resolving,
         onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
-          setQuery(event.target.value)
+          const value = event.target.value
+          setQuery(value)
+          // A by-key result belongs to the search that produced it: as soon as
+          // the box no longer names that key, its drawer is closed.
+          if (resolved !== undefined && issueKeyOf(value) !== resolved.issue.key) setResolved(undefined)
+        },
+        onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
+          if (event.key === 'Escape') {
+            if (query.trim() === '' && resolved === undefined) return
+            event.preventDefault()
+            clearSearch()
+            return
+          }
+          if (event.key !== 'Enter') return
+          const key = issueKeyOf(query)
+          if (key === undefined) return
+          event.preventDefault()
+          void openKey(key)
         },
         style: { ...input, flex: '1 1 180px', maxWidth: 280 },
       }),
+      // Says out loud that Enter will look the key up on the server, rather than
+      // letting an empty board imply the issue does not exist.
+      issueKeyOf(query) !== undefined
+        ? LI('span', { key: 'direct', style: { fontSize: '0.74em', color: C.textFaint } }, resolving ? '查找中…' : '回车按编号查找')
+        : null,
       filtering
         ? LI(
             'button',
@@ -2752,11 +5028,12 @@ function JiraBoardPanel(): React.ReactElement {
               key: 'clear',
               type: 'button',
               style: chip,
+              title: '清空状态、冲刺、经办人与搜索条件（项目是看板范围，不会被清掉）',
               onClick: () => {
-                setProject('all')
                 setCategory('all')
+                setSprint(SPRINT_ALL)
                 setMine(false)
-                setQuery('')
+                clearSearch()
               },
             },
             '清除筛选',
@@ -2765,7 +5042,19 @@ function JiraBoardPanel(): React.ReactElement {
       LI('span', { key: 'spacer', style: { flex: 1 } }),
       LI(
         'button',
-        { key: 'refresh', type: 'button', style: chip, disabled: loading, onClick: () => void refresh() },
+        {
+          key: 'refresh',
+          type: 'button',
+          style: chip,
+          disabled: loading,
+          title: '重新读取项目列表与当前项目的工单',
+          onClick: () => {
+            // The project list is re-read here too: a project somebody created
+            // since the panel opened has to become selectable without a reload.
+            void loadProjects()
+            void refresh()
+          },
+        },
         loading ? '刷新中…' : '刷新',
       ),
     ),
@@ -2789,12 +5078,19 @@ function JiraBoardPanel(): React.ReactElement {
           const text = jqlDraft
           setOverride(text)
           setEditingJql(false)
-          // The chip has to mirror what was just committed. Once a hand-written
-          // query is the override, the clause inside it survives the chip being
-          // switched off — so a query that pins the assignee IS the "assigned to
-          // me" state, and one that does not must clear it. Without this the
-          // chip could read "off" while the board stayed filtered.
+          // The chips have to mirror what was just committed. Once a
+          // hand-written query is the override, the clauses inside it survive a
+          // chip being switched off — so a query that pins the assignee IS the
+          // "assigned to me" state, one that names a sprint IS that sprint
+          // filter, and one that names a project IS the selected project.
+          // Without this the chips could read "全部" while the board stayed
+          // filtered. A set-shaped project restriction (`project in (...)`)
+          // deliberately leaves the project chip alone: no single chip can
+          // represent it, and the JQL row is where that query stays visible.
           setMine(MINE_PATTERN.test(text))
+          setSprint(sprintFilterOf(text))
+          const projectKey = projectFilterOf(text)
+          if (projectKey !== '') openProject(projectKey)
         },
         style: {
           ...input,
@@ -2940,6 +5236,9 @@ function JiraBoardPanel(): React.ReactElement {
             key: 'drawer',
             issue: selectedIssue,
             promptTemplate,
+            // Present exactly when this issue came from a key lookup, whose
+            // response is the same document the drawer would ask for.
+            seeded: selectedIssue.key === resolved?.issue.key ? seededDetail : undefined,
             onClose: () => {
               setSelected(undefined)
             },
@@ -3067,7 +5366,22 @@ function BoardPanelIcon({ active, size }: { active?: boolean; size?: number }): 
 // Client plugin
 // ---------------------------------------------------------------------------
 
-export { AtlassianSettings, JiraBoardPanel, BoardPanelIcon, withMine }
+export {
+  AtlassianSettings,
+  JiraBoardPanel,
+  BoardPanelIcon,
+  withMine,
+  withProject,
+  projectFilterOf,
+  withSprint,
+  sprintFilterOf,
+  sprintChoices,
+  togglePinned,
+  pushRecent,
+  openingPlan,
+  canReuseProjects,
+  issueKeyOf,
+}
 
 /** Client-plane plugin name, used by the browser runtime's diagnostics. */
 export const name = 'dsh-plugin-atlassian'
@@ -3084,7 +5398,8 @@ export const inject = ['slots']
  *
  * `sidebar.panellist` is a root-scoped list whose ids address the keyed `main`
  * panel: registering the same id in both is what makes the sidebar icon open
- * this panel, with no navigation code of our own.
+ * this panel, with no navigation code of our own. The pair is therefore one
+ * unit, and the Settings switch removes both together.
  */
 export function apply(ctx: ClientContext): void {
   const withContext = (component: React.ComponentType<never>): React.ComponentType<never> => {
@@ -3105,14 +5420,64 @@ export function apply(ctx: ClientContext): void {
     ),
   )
 
-  ctx.slots.inject('sidebar.panellist', () =>
-    ctx.slots.register(
-      { name: 'sidebar.panellist', id: PANEL_ID, order: 40, label: 'Jira' },
-      withContext(BoardPanelIcon as unknown as React.ComponentType<never>),
-    ),
+  /** Registration returns a disposer, but the surface is typed loosely. */
+  const asDisposer = (value: unknown): (() => void) =>
+    typeof value === 'function' ? (value as () => void) : () => undefined
+
+  const entries: (() => void)[] = []
+  // The slot types are declarations owned by the shell; both must be present
+  // before either registration makes sense. `inject` reports each one, and
+  // sync() re-runs when the second arrives or the preference changes.
+  let panelSlot = false
+  let mainSlot = false
+
+  const syncPanel = (): void => {
+    const wanted = panelPrefs.value.panelVisible && panelSlot && mainSlot
+    if (wanted && entries.length === 0) {
+      entries.push(
+        asDisposer(
+          ctx.slots.register(
+            { name: 'sidebar.panellist', id: PANEL_ID, order: 40, label: 'Jira' },
+            withContext(BoardPanelIcon as unknown as React.ComponentType<never>),
+          ),
+        ),
+      )
+      entries.push(
+        asDisposer(
+          ctx.slots.register(
+            { name: 'main', key: PANEL_ID },
+            withContext(JiraBoardPanel as unknown as React.ComponentType<never>),
+          ),
+        ),
+      )
+    } else if (!wanted && entries.length > 0) {
+      // `main` first: the layout clears a selection whose panel is no longer
+      // registered, so the board cannot outlive the icon that opened it.
+      for (const dispose of entries.splice(0).reverse()) dispose()
+    }
+  }
+
+  ctx.slots.inject('sidebar.panellist', () => {
+    panelSlot = true
+    syncPanel()
+  })
+  ctx.slots.inject('main', () => {
+    mainSlot = true
+    syncPanel()
+  })
+
+  const stop = subscribePanelPrefs(syncPanel)
+  ctx.effect?.(
+    () => () => {
+      stop()
+      // The registrations were made through `register()` directly, so their
+      // disposers are ours to run rather than the injection effect's.
+      for (const dispose of entries.splice(0)) dispose()
+    },
+    'atlassian: panel entries',
   )
 
-  ctx.slots.inject('main', () =>
-    ctx.slots.register({ name: 'main', key: PANEL_ID }, withContext(JiraBoardPanel as unknown as React.ComponentType<never>)),
-  )
+  // One read per page load. Until it lands the panel stays visible, which is
+  // also the safe answer when the route is missing or the request is fenced.
+  void loadPanelPrefs()
 }

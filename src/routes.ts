@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AtlassianBridge, BridgeSnapshot } from './bridge.js'
 import { BoardError, type JiraBoard } from './board.js'
+import type { PreferenceStore } from './prefs.js'
 
 /** Everything the Settings page and the Jira board talk to lives under this prefix. */
 export const ROUTE_PREFIX = '/plugins/atlassian'
@@ -36,6 +37,11 @@ export interface BoardRouteOptions {
   timeoutMs: number
   /** Instruction template for a hand-over; empty selects the built-in one. */
   promptTemplate: string
+  /**
+   * Custom-field id backing the sprint field, when the site does not use the
+   * default `sprint` name. Empty asks for the well-known field only.
+   */
+  sprintField: string
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -101,8 +107,12 @@ function requireString(input: Record<string, unknown>, field: string): string {
  *
  * Path shapes:
  * - `GET  /status`, `POST /connect`, `POST /disconnect` — the Settings page.
+ * - `POST /test` — probe whether the current token is still accepted.
+ * - `GET  /tools` — every registered tool with its server-supplied description.
+ * - `GET  /prefs`, `POST /prefs` — the UI preferences document.
  * - `GET  /board?jql=` — issues for the board, grouped client-side.
  * - `GET  /projects` — projects the authorization can see.
+ * - `GET  /sprints?project=` — every sprint that project's boards offer.
  * - `GET  /issue/<key>` — one issue with its description.
  * - `GET  /issue/<key>/transitions` — transitions currently offered.
  * - `POST /transition` — apply one transition by id.
@@ -111,6 +121,7 @@ function requireString(input: Record<string, unknown>, field: string): string {
  * @param bridge - The connection the Settings endpoints drive.
  * @param board - The Jira projection the board endpoints read.
  * @param options - Deployment defaults for board reads.
+ * @param prefs - The persisted UI preferences the Settings switch edits.
  * @param fence - Optional request fence, when the `connection` service exists.
  * @returns A disposer that unregisters the route.
  *
@@ -123,6 +134,7 @@ export function registerRoutes(
   bridge: AtlassianBridge,
   board: JiraBoard,
   options: BoardRouteOptions,
+  prefs: PreferenceStore,
   fence: RequestFence | undefined,
 ): () => void {
   return web.register({
@@ -158,6 +170,63 @@ export function registerRoutes(
           sendJson(res, 200, { ...snapshot, ok: true })
           return
         }
+        if (action === 'test' && method === 'POST') {
+          // Always 200 with the verdict in the body: "the token is dead" is a
+          // successful measurement, not a failed request. The page renders the
+          // verdict instead of turning it into a generic transport error.
+          const test = await bridge.testConnection()
+          sendJson(res, 200, { ok: true, test })
+          return
+        }
+        if (action === 'tools' && method === 'GET') {
+          // The Settings page's tool browser. Descriptions are large but this
+          // is a per-page load, not something the status poll carries.
+          sendJson(res, 200, { ok: true, tools: bridge.tools() })
+          return
+        }
+        if (action === 'prefs' && method === 'GET') {
+          // The sidebar switch. Read on every page load: the host document is
+          // the source of truth, so two browsers on one profile agree.
+          sendJson(res, 200, { ok: true, prefs: await prefs.load() })
+          return
+        }
+        if (action === 'prefs' && method === 'POST') {
+          const input = await readJsonBody(req)
+          // Both fields are optional so one switch can be written without
+          // restating the other, but a field that IS present must be exactly
+          // the shape it claims to be: `"false"` is a caller bug, and storing
+          // it as `true` would silently ignore the switch that sent it.
+          const patch: { panelVisible?: boolean; pinnedProjects?: string[]; recentProjects?: string[] } = {}
+          if (input['panelVisible'] !== undefined) {
+            if (typeof input['panelVisible'] !== 'boolean') {
+              throw new BoardError('bad-request', 'panelVisible 必须是布尔值')
+            }
+            patch.panelVisible = input['panelVisible']
+          }
+          if (input['pinnedProjects'] !== undefined) {
+            const pinned = input['pinnedProjects']
+            if (!Array.isArray(pinned) || pinned.some((entry) => typeof entry !== 'string')) {
+              throw new BoardError('bad-request', 'pinnedProjects 必须是字符串数组')
+            }
+            patch.pinnedProjects = pinned as string[]
+          }
+          if (input['recentProjects'] !== undefined) {
+            const recent = input['recentProjects']
+            if (!Array.isArray(recent) || recent.some((entry) => typeof entry !== 'string')) {
+              throw new BoardError('bad-request', 'recentProjects 必须是字符串数组')
+            }
+            patch.recentProjects = recent as string[]
+          }
+          if (
+            patch.panelVisible === undefined &&
+            patch.pinnedProjects === undefined &&
+            patch.recentProjects === undefined
+          ) {
+            throw new BoardError('bad-request', '缺少字段 panelVisible、pinnedProjects 或 recentProjects')
+          }
+          sendJson(res, 200, { ok: true, prefs: await prefs.patch(patch) })
+          return
+        }
         if (action === 'debug-tools' && method === 'GET') {
           // Diagnostics for the board's pattern-based lookup: when a pattern
           // misses, this is what distinguishes "renamed server-side" from
@@ -172,6 +241,7 @@ export function registerRoutes(
             jql: requested === null ? options.jql : requested,
             limit: options.limit,
             timeoutMs: options.timeoutMs,
+            sprintField: options.sprintField,
           })
           sendJson(res, 200, { ok: true, ...payload, limit: options.limit })
           return
@@ -179,6 +249,16 @@ export function registerRoutes(
         if (action === 'projects' && method === 'GET') {
           const projects = await board.projects(options.timeoutMs)
           sendJson(res, 200, { ok: true, projects })
+          return
+        }
+        // A project's sprint CATALOGUE — every sprint its boards offer, closed
+        // ones included. The panel's sprint row is built from this, not from the
+        // sprints the current page happens to show.
+        if (action === 'sprints' && method === 'GET') {
+          const project = (url.searchParams.get('project') ?? '').trim()
+          if (project === '') throw new BoardError('bad-request', '缺少 project 参数')
+          const sprints = await board.sprints(project, options.timeoutMs)
+          sendJson(res, 200, { ok: true, project, sprints })
           return
         }
         if (action === 'transition' && method === 'POST') {
@@ -193,7 +273,7 @@ export function registerRoutes(
         const issueMatch = /^issue\/([^/]+)$/.exec(action)
         if (issueMatch !== null && method === 'GET') {
           const key = decodeURIComponent(issueMatch[1] ?? '')
-          const detail = await board.detail(key, options.timeoutMs)
+          const detail = await board.detail(key, options.timeoutMs, options.sprintField)
           sendJson(res, 200, { ok: true, ...detail })
           return
         }

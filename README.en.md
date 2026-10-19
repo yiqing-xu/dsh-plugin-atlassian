@@ -6,13 +6,13 @@
 
 Bridges **Atlassian's official remote MCP server** into
 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh). After a single browser
-authorization, the Jira, Confluence, Jira Service Management, Bitbucket and Compass tools appear as
+authorization, tools for Jira, Confluence, Bitbucket, Goals, Projects, Loom and more appear as
 native tools in the agent's tool list:
 
 ```
 mcp__atlassian__getJiraIssue
 mcp__atlassian__createJiraIssue
-mcp__atlassian__searchConfluenceUsingCql
+mcp__atlassian__searchConfluence
 ```
 
 ![Settings → Atlassian](assets/settings-page.png)
@@ -20,6 +20,16 @@ mcp__atlassian__searchConfluenceUsingCql
 The DSH built-in `dsh-mcp-client` has no OAuth support, and API-token auth forces an explicit
 `cloudId` on every tool call. This plugin supplies the missing piece over OAuth 2.1 — the site
 follows from the authorization, so no `cloudId` is ever passed.
+
+The plugin speaks Atlassian MCP **v2**: `https://mcp.atlassian.com/v2/mcp?tools=all`. By default v2
+only exposes a small primary tool set plus `discover` / `executeRead` / `executeWrite` /
+`executeDestructive`; `?tools=all` is the official entry point for clients that need a flat tool
+list. This plugin bridges each `tools/list` entry into a native tool and the Jira board also calls
+raw names, so it uses the flat catalogue.
+
+v2 is a **separate OAuth resource**: its authorization server is `auth.atlassian.com/<id>`, and a v1
+client registration or token cannot be reused. Session files are keyed by URL, so the old one is
+kept; you just need to click **Connect Atlassian** once after upgrading.
 
 ## Supported Harness versions
 
@@ -52,13 +62,37 @@ add under `allowBuilds` in that profile's `pnpm-workspace.yaml`.)
 2. Click **Connect Atlassian**
 3. Approve the request on Atlassian's authorization page, **choosing the site to authorize**
 4. The status becomes **Connected**, and Settings lists the site and the tools it exposes
+5. Click **View tools** to expand the catalogue, then search or read each tool's name and the
+   description Atlassian supplied for it
+6. At any later point, click **Test connection** to verify the current token is still accepted
 
 ![The entry in the settings nav](assets/settings-nav.png)
 
 The settings page at the top of this README is that connected state: the site row shows whichever site
-you authorized, and the tool count on this machine was 32. If the authorization page does not open by
-itself, Settings shows a clickable authorization link. If the flow gets stuck, click **Disconnect**
-and reconnect.
+you authorized, and the tool count depends on the products that site exposes. If the authorization
+page does not open by itself, Settings shows a clickable authorization link. If the flow gets stuck,
+click **Disconnect** and reconnect.
+
+The tool catalogue loads on demand, so it never slows the status poll that runs every few seconds.
+The names are the same ones the agent sees (`mcp__atlassian__...`), and the descriptions are passed
+through verbatim from the MCP server, which makes the list useful for checking whether a capability
+exists and how it should be called.
+
+The **Sidebar entry** switch at the bottom of the page controls whether the sidebar shows the Jira
+icon. Turning it off withdraws the icon and the board panel it opens together; board data and the
+agent tools are unaffected, and the switch can be turned back on at any time. The choice lives in the
+profile (`.dsh-atlassian/atlassian-prefs.json`), survives a restart, and is **not** reset by
+disconnecting.
+
+**Test connection** does not read a locally recorded expiry time: it makes one real authenticated
+read-only call over the existing MCP connection (`getAccessibleAtlassianResources`, then
+`atlassianUserInfo`, then `tools/list`). So:
+
+- Expired access token but a usable refresh token → the SDK refreshes transparently and the page says
+  **Token refreshed**
+- Both dead (401 / `invalid_grant`) → the local tokens are cleared, the registered tools are
+  unregistered, and the page asks you to reconnect
+- A network failure or an Atlassian 5xx → only **Could not verify**; the authorization is left alone
 
 Once connected, just ask the agent in plain language:
 
@@ -79,18 +113,32 @@ connection, so it needs no extra token or cloudId configuration:
 - **Columns are statuses.** Every Jira status is a column, ordered by status category (to do → in
   progress → done); within a category they are ordered by name, so a refresh never reshuffles the
   columns.
-- **Filter by project.** The project chips are derived from the issues the current query actually
-  returned, each carrying its count — so clicking one cannot land on an empty project. Click again
-  to clear it, or use **Clear filters** to reset everything at once.
+- **The project row is Jira's own "recent" idea.** A site holds far more projects than a row can show
+  (this one lists 148), so the row carries only: every **pinned** project in pin order; then the
+  **recently opened** ones, newest first (at most 8); plus the **current selection**, which is visible
+  even when it is neither pinned nor recent. Everything else lives behind the **更多项目 · N** picker at
+  the end of the row, which searches by key or name and leads with the site's own
+  `lastIssueUpdateTime` — "what changed lately" beats an alphabetical wall. The project **is** the
+  board's scope, so there is no "All" entry and the count beside a chip is that project's real issue
+  count. The recent list lives in the profile's `.dsh-atlassian/atlassian-prefs.json`.
+- **Pinned projects.** Each project chip carries its own pin button (hollow dot → filled dot) on its
+  right: clicking it **appends** the project to the front of the row, so several pins line up in the
+  order you clicked them, and clicking again removes the pin. A pin reorders the row only — it does
+  not hide a project or trigger a filter.
 - **Filter by status category.** The to do / in progress / done chips carry counts too, and combine
-  with the project filter as AND.
+  with the project scope as AND.
 - **Assigned to me.** The **Assignee → Me** toggle folds `assignee = currentUser()` into the JQL, so
-  the server does the filtering — it does not sift the 50 issues already loaded. The board fetches one
-  page per refresh, so filtering that page would report "nothing assigned to me" to someone whose
-  work simply is not on it. The toggle carries no count on purpose: it changes the query, so a truthful
-  number would cost another round-trip, and a number derived from the loaded page would just be wrong.
+  the server does the filtering — it does not sift the issues already loaded. Each read pages through
+  the current project until the server says it is complete (100 per request), so the toggle's answer
+  does not depend on how large the project is. The toggle carries no count on purpose: it changes the
+  query, so a truthful number would cost another round-trip.
 - **The search box** matches substrings in the key, the summary and the project name, entirely
-  client-side, so it issues no requests.
+  client-side, so it issues no requests. The board only holds the current project's issues, though, so
+  **typing
+  `HMHP-111` or pasting a Jira link and pressing Enter** switches to an exact lookup by key on the
+  server: an issue from another page, or excluded by the current filters, opens just the same —
+  with its drawer, its transitions, and the hand-over actions. The looked-up issue is shown as one
+  extra card and outranks the filter chips; clearing the box or pressing `Esc` puts it away.
 - **View switch.** "In progress" excludes completed issues (the default, so a long backlog cannot
   bury the work in flight); "All" includes them.
 - **The JQL is shown and editable**, and takes effect on Enter — the JQL *is* the board's real
@@ -98,8 +146,25 @@ connection, so it needs no extra token or cloudId configuration:
   **Reset** appears to return to the selected view.
 - The status spine down the left of each card, the project chip at its foot, and the totals in the
   header are all there to be read at a glance.
-- The board refreshes itself every 60 seconds, skipping while the page is hidden; the footer says
-  whether the per-fetch limit was reached.
+- **The board follows the theme.** Text, borders, card fills and status colours come from the
+  Harness theme variables, so dark mode never produces dark-on-dark text; card hover, scrollbars and
+  the keyboard focus ring are drawn for the active theme too.
+- The board refreshes itself every 60 seconds, skipping while the page is hidden; **Refresh** also
+  re-reads the project list, so a project created elsewhere becomes selectable without a reload. The
+  footer only speaks up when the safety ceiling was actually reached.
+- **The project scope is visible in the JQL**: the row shown carries `project = <KEY>`. Hand-editing
+  it into a multi-project query (`project in (A, B)`) stops the chip from claiming a single project —
+  the query is the truth. The single-project form (`project = A`) is rewritten by the chip.
+- **Opening it again does not reload it.** Leaving for another panel or for Settings and coming back
+  shows the same board: data younger than a minute is reused outright, older data is painted first
+  and revalidated in the background, and only the first open waits. The view and the filters come
+  back with it. A failed background refresh only marks **sync failed** in the header instead of
+  replacing a readable board with an error page; disconnecting drops the cache and returns the
+  connect prompt.
+- **Clicking the title refreshes.** The whole "Jira board" identity block at the top left is a
+  button: a click re-reads the board immediately (same path as the toolbar's **Refresh**), and the
+  timestamp grows a **refreshing…** suffix while it runs — so caching does not leave you without a
+  way to ask for fresh data.
 
 ### 2. Read an issue and confirm a transition
 
@@ -152,19 +217,21 @@ dragged and opens the same menu for you to confirm the target.
 
 ## Tools you will get
 
-After authorizing, these appear in the agent's tool list as `mcp__atlassian__<name>`. Which ones are
-actually available depends on the products you can reach on the site you authorized:
+After authorizing, the tools in the `?tools=all` flat catalogue appear in the agent's tool list as
+`mcp__atlassian__<name>` (Jira, Confluence, Bitbucket, Goals, Projects and more, loaded according to
+the scopes granted — the table below is only the common subset). Which ones are actually available
+depends on the products you can reach on the site you authorized:
 
 | Tool | Purpose |
 |---|---|
 | `searchJiraIssuesUsingJql` | Search issues with JQL |
 | `getJiraIssue` | Read a single issue |
 | `createJiraIssue` | Create an issue |
-| `getVisibleJiraProjects` | List the Jira projects you can see |
-| `getTransitionsForJiraIssue` | List the available status transitions for an issue |
-| `searchConfluenceUsingCql` | Search Confluence with CQL |
-| `getConfluencePage` | Read a page |
-| `createConfluencePage` / `updateConfluencePage` | Create / update a page |
+| `listJiraProjects` | List the Jira projects you can see |
+| `listJiraIssueTransitions` | List the available status transitions for an issue |
+| `searchConfluence` | Search Confluence with CQL |
+| `getConfluenceContent` | Read a page |
+| `createConfluenceContent` / `updateConfluenceContent` | Create / update a page |
 | `atlassianUserInfo` | The authorized account |
 | `getAccessibleAtlassianResources` | The sites this authorization can reach |
 
@@ -176,11 +243,12 @@ The defaults work out of the box. To change one, override by `id: atlassian` in 
 | Field | Default | Meaning |
 |---|---|---|
 | `serverName` | `atlassian` | Tool-name prefix: `mcp__<serverName>__<tool>` |
+| `url` | `https://mcp.atlassian.com/v2/mcp?tools=all` | MCP v2 flat tool catalogue; dropping `?tools=all` leaves only the primary tools |
 | `redirectPort` | `3334` | OAuth callback port — keep it stable |
 | `expectedSite` | empty | When set, the authorized site is checked and a mismatch reported |
 | `autoOpenBrowser` | `true` | Open the browser when **Connect Atlassian** is clicked |
 | `board.jql` | empty | JQL the board opens with; empty selects the built-in "in progress" view (excludes done) |
-| `board.limit` | `50` | Issues fetched per refresh (the server caps a page at 100) |
+| `board.limit` | `5000` | A **safety ceiling**, not a page size: the board pages through the current project 100 at a time until the server reports it complete, and only stops here (and says so in the footer) |
 | `board.timeoutMs` | `90000` | Deadline for one board read |
 | `board.promptTemplate` | empty | Instruction sent when an issue is handed to an agent; empty selects the built-in template |
 
@@ -211,7 +279,25 @@ Look for warnings prefixed with `atlassian:` in the startup log.
 
 Use the authorization link shown in Settings. If `redirectPort` is taken, the plugin falls back to
 a temporary port and re-registers automatically. If the flow is truly stuck, click **Disconnect**
-to clear the token and reconnect.
+to clear the token and reconnect. If the authorization page explicitly rejects the redirect, a site
+admin must allowlist `http://127.0.0.1:<redirectPort>/callback` in Atlassian's domain settings (v2
+may enforce a redirect allowlist).
+</details>
+
+<details>
+<summary>Stuck at "Authorization required" after upgrading from v1</summary>
+
+v2 is a separate OAuth resource, so a v1 client registration or token cannot be reused. Session
+files are keyed by URL and the old one is left untouched; click **Connect Atlassian** once to
+authorize against v2.
+</details>
+
+<details>
+<summary>How do I know whether the token is still valid</summary>
+
+Click **Test connection**. It makes a real authenticated call rather than reading a local expiry time;
+only an explicit rejection (401 / `invalid_grant`) clears the authorization and asks you to reconnect.
+A network failure or a 5xx reports "could not verify" and leaves the authorization alone.
 </details>
 
 <details>
@@ -236,6 +322,10 @@ notice, not a block.**
 - The Settings nav icon is patched in place (DSH exposes no icon interface); if the patch does not
   match, the default gear stays
 - A `expectedSite` mismatch is not a hard block
+- The flat `?tools=all` catalogue is used instead of v2's deferred `discover` / `execute*` mode, so
+  consent covers every scope the resource publishes and the tool list grows with the products the
+  authorized site exposes
+- JSM tools only support API-token auth in v2; this plugin is OAuth-only, so JSM tools are not loaded
 
 ## Development
 
@@ -243,7 +333,7 @@ notice, not a block.**
 npm install && npm run build   # tsc(host) + tsc(client) + bundle the client
 ```
 
-Verifying on a scratch profile, the two regression scripts, and the README / storefront capture flow
+Verifying on a scratch profile, the four regression scripts, and the README / storefront capture flow
 are covered in `dev/README.md`.
 
 ## License

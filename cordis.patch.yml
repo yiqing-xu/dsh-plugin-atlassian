@@ -12,7 +12,17 @@
       name: dsh-plugin-atlassian
       config:
         serverName: atlassian
-        url: https://mcp.atlassian.com/v1/mcp
+        # Atlassian MCP v2. `?tools=all` asks for the paginated flat tool
+        # catalogue: v2 otherwise exposes only a handful of primary tools plus
+        # discover/executeRead/executeWrite/executeDestructive, while this plugin
+        # bridges each `tools/list` entry to a native tool and the Jira board
+        # calls raw tool names directly.
+        #
+        # v2 is a separate OAuth resource from v1: its authorization server is
+        # `auth.atlassian.com/<id>` and a v1 client registration/token cannot be
+        # reused. The session file is keyed by this URL, so switching endpoints
+        # starts a clean registration rather than silently reusing v1 state.
+        url: https://mcp.atlassian.com/v2/mcp?tools=all
         # Loopback port for the OAuth redirect URI. Must stay stable across
         # restarts: the dynamic client registration binds this exact URI, and
         # a changed port invalidates the stored client registration.
@@ -36,8 +46,13 @@
           # Atlassian refuses a wholly unconstrained search. The panel's own view
           # selector and JQL box override this for the session.
           jql: ''
-          # Issues fetched per refresh (the server caps a page at 100).
-          limit: 50
+          # A SAFETY CEILING, not a page size. The board always reads exactly
+          # one project — the project chip is the board's scope and there is no
+          # "all projects" option — and pages through its issues 100 per request
+          # until the server reports the result complete. Only this ceiling stops
+          # that walk early, and the footer says so when it does, so it exists
+          # purely to keep a pathological site from hanging the panel.
+          limit: 5000
           # Deadline for one board read: a search, plus the site-registry
           # lookup on a cold start, so it is allowed to outlast a tool call.
           timeoutMs: 90000
@@ -46,3 +61,8 @@
           # which tells the agent to verify before editing and NOT to change the
           # Jira workflow — status transitions stay the user's call.
           promptTemplate: ''
+          # Custom-field id of the sprint field when the site does not use the
+          # default `sprint` field (e.g. `customfield_10020`). Empty asks for the
+          # well-known field only; a set id is requested ALONGSIDE it, so a wrong
+          # value cannot blind the sprint filter.
+          sprintField: ''

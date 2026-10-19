@@ -13,7 +13,14 @@ export interface Config {
    * the two can coexist and session history stays readable.
    */
   serverName: string
-  /** Atlassian remote MCP endpoint (Streamable HTTP). */
+  /**
+   * Atlassian remote MCP endpoint (Streamable HTTP).
+   *
+   * v2 exposes only a small primary tool set plus discover/execute unless the
+   * flat catalogue is requested, so the default carries `?tools=all`: this
+   * plugin bridges each `tools/list` entry to a native tool, and the Jira board
+   * also calls the raw names directly.
+   */
   url: string
   /**
    * Loopback port for the OAuth redirect URI. `0` picks a free port.
@@ -77,11 +84,22 @@ export interface BoardConfig {
    * the claim.
    */
   promptTemplate: string
+  /**
+   * Custom-field id of the sprint field, when it is not Jira's default
+   * `sprint`.
+   *
+   * The board always asks for `sprint` BY NAME — v2 resolves that on every site
+   * — and this id is requested alongside it, never instead of it, so a wrong
+   * value cannot blind the sprint filter. It matters on sites that renamed the
+   * field (where `sprint` answers nothing) or that run several sprint-like
+   * fields. Example: `customfield_10020`.
+   */
+  sprintField: string
 }
 
 export const Config = z.object({
   serverName: z.string().default('atlassian'),
-  url: z.string().default('https://mcp.atlassian.com/v1/mcp'),
+  url: z.string().default('https://mcp.atlassian.com/v2/mcp?tools=all'),
   redirectPort: z.number().step(1).min(0).max(65535).default(3334),
   toolCallTimeoutMs: z.number().step(1).min(1).default(60000),
   expectedSite: z.string().default(''),
@@ -92,8 +110,13 @@ export const Config = z.object({
   // block resolve to the full shape.
   board: z.object({
     jql: z.string().default(''),
-    limit: z.number().step(1).min(1).max(100).default(50),
+    // A SAFETY CEILING, not a page size: the board pages through its query until
+    // the server reports it complete, and only stops here. The default is far
+    // above a normal project so the panel holds the whole thing; it exists only
+    // so a site with tens of thousands of matching issues cannot hang the page.
+    limit: z.number().step(1).min(1).default(5000),
     timeoutMs: z.number().step(1).min(1000).default(90000),
     promptTemplate: z.string().default(''),
+    sprintField: z.string().default(''),
   }),
 })

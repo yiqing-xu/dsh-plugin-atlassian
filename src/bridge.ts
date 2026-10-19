@@ -81,6 +81,78 @@ export interface BridgeSnapshot {
   error: string | undefined
 }
 
+/** One tool exactly as this connection registered it. */
+export interface BridgedTool {
+  /** Public DSH tool name, e.g. `mcp__atlassian__getJiraIssue`. */
+  name: string
+  /** Raw MCP name the server listed, e.g. `getJiraIssue`. */
+  rawName: string
+  /** Description the server supplied, verbatim. */
+  description: string
+}
+
+/** What an on-demand token probe concluded. */
+export type ConnectionTestVerdict =
+  | 'valid'
+  | 'refreshed'
+  | 'invalid'
+  | 'degraded'
+  | 'unknown'
+  | 'not-connected'
+
+/**
+ * The result of probing the live connection's credentials.
+ *
+ * Deliberately a separate wire shape from {@link BridgeSnapshot}: a probe is a
+ * point-in-time answer, not a new connection state. Only `invalid` changes the
+ * snapshot (the credentials are dropped and the tools unregistered).
+ */
+export interface ConnectionTest {
+  /** `true` only when the probe proved the connection usable right now. */
+  ok: boolean
+  verdict: ConnectionTestVerdict
+  /** ISO timestamp of when the probe finished. */
+  checkedAt: string
+  durationMs: number
+  /** MCP tool the probe called, or `tools/list` when no probe tool existed. */
+  tool?: string
+  /** Site the probe confirmed, when the tool returns resources. */
+  site?: string
+  message: string
+}
+
+/** One probe must not outlive a click by much; the normal call has 60s. */
+const PROBE_TIMEOUT_MS = 20_000
+
+/** Bound a server message before it reaches the page. */
+function clip(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`
+}
+
+/** The HTTP status a transport error carries, when it carries one. */
+function httpStatus(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const record = error as Record<string, unknown>
+  for (const key of ['code', 'status', 'statusCode']) {
+    const value = record[key]
+    if (typeof value === 'number') return value
+  }
+  return undefined
+}
+
+/**
+ * Whether an error means the credentials themselves were rejected.
+ *
+ * The distinction matters: a network failure or a 5xx says nothing about the
+ * token, so the probe must report "unknown" and leave the connection alone.
+ * A 401, an OAuth `invalid_grant` (dead refresh token), or an `invalid_client`
+ * (dead registration) all mean re-authorization is unavoidable.
+ */
+function isAuthFailure(signature: string, status: number | undefined): boolean {
+  if (status === 401) return true
+  return /invalid_?(?:grant|token|client)|unauthorized|token.*(?:expired|invalid)/i.test(signature)
+}
+
 /** Join MCP content blocks into the text the model reads. */
 function extractText(content: unknown, rawName: string): string {
   if (!Array.isArray(content)) return `(${rawName} returned no content)`
@@ -108,9 +180,9 @@ function extractText(content: unknown, rawName: string): string {
 /**
  * Read the site host out of an `*AccessibleAtlassianResources` payload.
  *
- * The tool answers with a JSON array of `{ id, url, name, ... }`; the `url` is
- * the site the user granted, which is the only place the authorization server
- * tells us which site was chosen.
+ * v2 wraps every tool answer in `{ data }` and lists sites under
+ * `data.resources` (`cloudId`, not `id`); v1 answered a bare array. Only `url`
+ * matters here, and it is common to both shapes.
  */
 function siteFromResources(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined
@@ -120,7 +192,16 @@ function siteFromResources(content: unknown): string | undefined {
     if (typeof text !== 'string') continue
     try {
       const parsed: unknown = JSON.parse(text)
-      const entries = Array.isArray(parsed) ? parsed : [parsed]
+      let body = parsed
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const data = (body as Record<string, unknown>)['data']
+        if (data !== undefined) body = data
+      }
+      const resources =
+        typeof body === 'object' && body !== null && !Array.isArray(body)
+          ? (body as Record<string, unknown>)['resources']
+          : undefined
+      const entries = Array.isArray(body) ? body : Array.isArray(resources) ? resources : []
       for (const entry of entries) {
         if (typeof entry !== 'object' || entry === null) continue
         const url = (entry as Record<string, unknown>)['url']
@@ -162,10 +243,13 @@ export class AtlassianBridge {
   #disposers = new Map<string, () => void>()
   /** public tool name → the raw MCP name `tools/call` must carry. */
   #rawNames = new Map<string, string>()
+  /** The current tool generation, with the descriptions the server supplied. */
+  #toolInfo: BridgedTool[] = []
   #status: BridgeStatus = 'idle'
   #authorizationUrl: string | undefined
   #error: string | undefined
   #running: Promise<void> | undefined
+  #testing: Promise<ConnectionTest> | undefined
   #disposed = false
   #waiters: Waiter[] = []
 
@@ -194,6 +278,18 @@ export class AtlassianBridge {
    */
   rawNames(): readonly string[] {
     return [...this.#rawNames.values()]
+  }
+
+  /**
+   * The tools this connection registered, with their server-supplied
+   * descriptions.
+   *
+   * The Settings page renders this as a searchable catalogue. It is the same
+   * generation `rawNames()` reads, so a tool cannot appear in the model's list
+   * and be missing here.
+   */
+  tools(): readonly BridgedTool[] {
+    return this.#toolInfo
   }
 
   /**
@@ -240,6 +336,159 @@ export class AtlassianBridge {
     })) as CallToolResult
     if (result.isError === true) throw new Error(extractText(result.content, rawName))
     return result.content
+  }
+
+  /**
+   * Probe the live connection to answer "is this token still good?".
+   *
+   * A token can only be judged by the server that issued it, so this makes a
+   * real authenticated request: the cheapest read-only tool that also touches
+   * Atlassian's own APIs (`getAccessibleAtlassianResources`), falling back to
+   * `atlassianUserInfo` and then to `tools/list`. That path is also why an
+   * expired access token is usually invisible to the user — the transport sees
+   * the 401, refreshes with the stored refresh token, and replays the call. The
+   * probe reports that as `refreshed` rather than claiming nothing happened.
+   *
+   * When the credentials are rejected outright the local tokens are cleared and
+   * the tools unregistered, so the page cannot keep claiming "connected" while
+   * every call is doomed. Overlapping clicks share one probe.
+   */
+  async testConnection(): Promise<ConnectionTest> {
+    const running = this.#testing ?? this.#probe()
+    this.#testing = running
+    try {
+      return await running
+    } finally {
+      if (this.#testing === running) this.#testing = undefined
+    }
+  }
+
+  async #probe(): Promise<ConnectionTest> {
+    const started = Date.now()
+    const checkedAt = new Date().toISOString()
+    const result = (
+      fields: Omit<ConnectionTest, 'checkedAt' | 'durationMs'>,
+    ): ConnectionTest => ({ checkedAt, durationMs: Date.now() - started, ...fields })
+
+    const client = this.#client
+    if (client === undefined || this.#status !== 'ready') {
+      return result({
+        ok: false,
+        verdict: 'not-connected',
+        message: '当前没有已建立的连接，请先连接 Atlassian。',
+      })
+    }
+
+    const before = this.#options.store.current.tokens?.access_token
+    const probe =
+      this.rawNameMatching(/accessibleatlassianresources/i) ??
+      this.rawNameMatching(/atlassianuserinfo/i)
+    let content: readonly unknown[] | undefined
+
+    try {
+      if (probe === undefined) {
+        // No known read-only tool: still force one authenticated round-trip.
+        await client.listTools()
+      } else {
+        const call = (await client.callTool({ name: probe, arguments: {} }, undefined, {
+          timeout: PROBE_TIMEOUT_MS,
+        })) as CallToolResult
+        if (call.isError === true) {
+          return result({
+            ok: false,
+            verdict: 'degraded',
+            tool: probe,
+            message: `令牌仍被 MCP 服务器接受，但探测工具返回错误：${clip(
+              extractText(call.content, probe),
+              400,
+            )}`,
+          })
+        }
+        content = call.content
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      const signature = `${error instanceof Error ? error.name : ''} ${detail}`
+      const status = httpStatus(error)
+
+      if (error instanceof UnauthorizedError || isAuthFailure(signature, status)) {
+        await this.#invalidate(signature)
+        return result({
+          ok: false,
+          verdict: 'invalid',
+          ...(probe === undefined ? {} : { tool: probe }),
+          message: 'Atlassian 拒绝了当前令牌，本地授权已清除，请重新连接。',
+        })
+      }
+      if (status === 403) {
+        return result({
+          ok: false,
+          verdict: 'degraded',
+          ...(probe === undefined ? {} : { tool: probe }),
+          message: `令牌有效，但缺少访问权限（HTTP 403）：${clip(detail, 300)}`,
+        })
+      }
+      if (status === 404) {
+        // The credential was not refused; this is usually a stale MCP session
+        // (or a moved endpoint), which a reconnect fixes.
+        return result({
+          ok: false,
+          verdict: 'unknown',
+          ...(probe === undefined ? {} : { tool: probe }),
+          message: '服务器返回 404（MCP 会话或端点已失效），请点「断开连接」后重连。',
+        })
+      }
+      return result({
+        ok: false,
+        verdict: 'unknown',
+        ...(probe === undefined ? {} : { tool: probe }),
+        message: `无法完成验证，连接状态未改变：${clip(detail, 300)}`,
+      })
+    }
+
+    // A silent refresh is still a successful probe, but saying so is useful:
+    // it explains why the first call after a long idle period is slow.
+    const after = this.#options.store.current.tokens?.access_token
+    const refreshed =
+      typeof before === 'string' && typeof after === 'string' && before !== after
+    const site = content === undefined ? undefined : siteFromResources(content)
+    if (site !== undefined) await this.#options.store.patch({ site })
+    const where = site === undefined ? '' : `，站点 ${site}`
+
+    return result({
+      ok: true,
+      verdict: refreshed ? 'refreshed' : 'valid',
+      tool: probe ?? 'tools/list',
+      ...(site === undefined ? {} : { site }),
+      message:
+        probe === undefined
+          ? `令牌有效（未找到可用的只读工具，只验证了 MCP 层${where}）。`
+          : refreshed
+            ? `访问令牌已过期，已自动用 refresh token 换到新令牌${where}。`
+            : `令牌有效，探测工具调用成功${where}。`,
+    })
+  }
+
+  /**
+   * Drop credentials that the server has just refused.
+   *
+   * Tokens and the single-use PKCE verifier always go; the client registration
+   * only when the authorization server blamed it, because otherwise it is still
+   * the right registration for the next attempt.
+   */
+  async #invalidate(signature: string): Promise<void> {
+    this.#host.logger.warn(`atlassian: token probe was rejected — ${clip(signature, 300)}`)
+    await this.#teardownClient()
+    this.#clearTools()
+    this.#authorizationUrl = undefined
+    if (/invalid_?client|unauthorized_?client/i.test(signature)) {
+      await this.#options.store.clear('tokens', 'codeVerifier', 'clientInformation')
+    } else {
+      await this.#options.store.clear('tokens', 'codeVerifier')
+    }
+    this.#error = 'Atlassian 授权已失效，请重新连接。'
+    this.#status = 'error'
+    this.#notify()
   }
 
   /** A view for the Settings page. */
@@ -319,9 +568,7 @@ export class AtlassianBridge {
   /** Forget the tokens and drop every bridged tool. */
   async disconnect(): Promise<BridgeSnapshot> {
     await this.#teardownClient()
-    for (const dispose of this.#disposers.values()) dispose()
-    this.#disposers = new Map()
-    this.#rawNames = new Map()
+    this.#clearTools()
     this.#authorizationUrl = undefined
     this.#error = undefined
     await this.#options.store.destroy()
@@ -336,10 +583,16 @@ export class AtlassianBridge {
     this.#disposed = true
     this.#callback.cancelWait()
     await this.#teardownClient()
+    this.#clearTools()
+    await this.#callback.close()
+  }
+
+  /** Unregister the current tool generation and forget its raw names. */
+  #clearTools(): void {
     for (const dispose of this.#disposers.values()) dispose()
     this.#disposers = new Map()
     this.#rawNames = new Map()
-    await this.#callback.close()
+    this.#toolInfo = []
   }
 
   /**
@@ -453,6 +706,7 @@ export class AtlassianBridge {
   async #syncTools(client: Client): Promise<void> {
     const definitions = new Map<string, ToolDefinition>()
     const rawNames = new Map<string, string>()
+    const info: BridgedTool[] = []
     const seenCursors = new Set<string>()
     let cursor: string | undefined
 
@@ -467,6 +721,7 @@ export class AtlassianBridge {
         }
         definitions.set(publicName, this.#makeDefinition(client, publicName, tool.name, tool.description ?? '', tool.inputSchema))
         rawNames.set(publicName, tool.name)
+        info.push({ name: publicName, rawName: tool.name, description: tool.description ?? '' })
       }
       cursor = response.nextCursor
       if (cursor !== undefined) {
@@ -491,6 +746,7 @@ export class AtlassianBridge {
     }
     this.#disposers = next
     this.#rawNames = rawNames
+    this.#toolInfo = info
   }
 
   /** Build one tool definition over the live client. */

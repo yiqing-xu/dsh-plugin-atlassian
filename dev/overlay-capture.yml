@@ -22,7 +22,7 @@
     # (serverName, url), and this profile keeps its own copy of the
     # authorization so a capture run can never disturb the daily one.
     serverName: atlassian-dev
-    url: https://mcp.atlassian.com/v1/mcp
+    url: https://mcp.atlassian.com/v2/mcp?tools=all
     redirectPort: 3340
     expectedSite: ''
     toolCallTimeoutMs: 60000
