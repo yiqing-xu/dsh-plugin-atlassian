@@ -54,7 +54,17 @@ export interface BridgeHost {
 /** Deployment-owned settings the bridge reads. */
 export interface BridgeOptions {
   serverName: string
+  /** Endpoint whose tools are registered for the model. */
   url: string
+  /**
+   * Endpoint whose tools the Jira board calls by name.
+   *
+   * Equal to `url` means one connection serves both (the pre-`boardUrl`
+   * behaviour). A different value opens a second MCP session over the SAME
+   * authorization: both URLs point at `/v2/mcp`, so they are one OAuth resource
+   * and one store file.
+   */
+  boardUrl: string
   /** Loopback port to prefer for the OAuth redirect; `0` picks a free one. */
   redirectPort: number
   toolCallTimeoutMs: number
@@ -89,6 +99,14 @@ export interface BridgedTool {
   rawName: string
   /** Description the server supplied, verbatim. */
   description: string
+  /**
+   * `false` for a tool only the board's catalogue knows.
+   *
+   * With `boardUrl` pointing at the flat `?tools=all` catalogue and `url` at
+   * the default endpoint, the Settings page lists both: the model only ever
+   * sees (and pays context for) the registered subset.
+   */
+  registered: boolean
 }
 
 /** What an on-demand token probe concluded. */
@@ -227,11 +245,90 @@ interface Waiter {
 }
 
 /**
+ * Find the raw MCP name matching a fragment in one session.
+ *
+ * Case-insensitive because the Jira panel's callers name capabilities
+ * (`searchJiraIssuesUsingJql`), and a server-side rename must not silently
+ * break the panel. Kept module-level so the bridge and `#detectSite` share one
+ * definition of "matching".
+ */
+function findRawName(session: McpSession | undefined, pattern: RegExp): string | undefined {
+  if (session === undefined) return undefined
+  for (const raw of session.raw.values()) {
+    if (pattern.test(raw)) return raw
+  }
+  return undefined
+}
+
+/**
+ * Read every entry of a paginated `tools/list`.
+ *
+ * Atlassian's v2 server paginates the flat `?tools=all` catalogue, so reading
+ * only the first page would silently hide most tools. A repeated cursor is
+ * refused rather than followed: a server looping on one cursor would otherwise
+ * hang the connection forever.
+ *
+ * @param client - A connected MCP client.
+ * @returns The listed tools, in server order.
+ */
+async function listAllTools(client: Client): Promise<ListedTool[]> {
+  const tools: ListedTool[] = []
+  const seenCursors = new Set<string>()
+  let cursor: string | undefined
+  do {
+    const response = await client.listTools(cursor === undefined ? {} : { cursor })
+    for (const tool of response.tools) {
+      tools.push({
+        name: tool.name,
+        description: tool.description ?? '',
+        inputSchema: tool.inputSchema,
+      })
+    }
+    cursor = response.nextCursor
+    if (cursor !== undefined) {
+      if (seenCursors.has(cursor)) {
+        throw new Error('atlassian: server repeated a tools/list continuation cursor — refusing an invalid tool list')
+      }
+      seenCursors.add(cursor)
+    }
+  } while (cursor !== undefined)
+  return tools
+}
+
+/**
+ * One live MCP session plus the raw names it listed.
+ *
+ * The model session and the board session are structurally identical; they
+ * differ only in which endpoint they speak to and whether their tools are
+ * registered. Keeping them the same shape is what lets `boardUrl` empty out
+ * into a single shared session without a second code path.
+ */
+interface McpSession {
+  client: Client
+  /** public tool name → the raw MCP name `tools/call` must carry. */
+  raw: Map<string, string>
+}
+
+/** One entry of a paginated `tools/list`, narrowed to what this bridge reads. */
+interface ListedTool {
+  name: string
+  description: string
+  inputSchema: unknown
+}
+
+/**
  * Owns the MCP connection, the OAuth interaction, and the tool generation.
  *
  * One instance per composition row. Tool registration is generation-based:
  * discovery builds a complete next generation, and only a fully successful
  * build swaps it in, so a failed re-sync leaves the previous tools usable.
+ *
+ * Two sessions may run at once. The model session speaks {@link BridgeOptions.url}
+ * and its tools are registered; the board session speaks
+ * {@link BridgeOptions.boardUrl} and is never registered, because the flat
+ * `?tools=all` catalogue it needs would otherwise cost every request the
+ * definitions of ~200 tools. Both URLs point at the same OAuth resource, so
+ * they share one authorization and one store file.
  */
 export class AtlassianBridge {
   readonly #host: BridgeHost
@@ -239,12 +336,15 @@ export class AtlassianBridge {
   readonly #callback = new CallbackServer()
   readonly #provider: AtlassianOAuthProvider
 
-  #client: Client | undefined
+  /** The model-facing session: its tools are registered. */
+  #model: McpSession | undefined
+  /** The board's session; may be the same object as `#model`. */
+  #board: McpSession | undefined
   #disposers = new Map<string, () => void>()
-  /** public tool name → the raw MCP name `tools/call` must carry. */
-  #rawNames = new Map<string, string>()
-  /** The current tool generation, with the descriptions the server supplied. */
-  #toolInfo: BridgedTool[] = []
+  /** Descriptions from the model session's `tools/list`. */
+  #modelInfo: BridgedTool[] = []
+  /** Descriptions from the board session's `tools/list`. */
+  #boardInfo: BridgedTool[] = []
   #status: BridgeStatus = 'idle'
   #authorizationUrl: string | undefined
   #error: string | undefined
@@ -270,26 +370,26 @@ export class AtlassianBridge {
   }
 
   /**
-   * Every raw MCP tool name currently discovered, in registration order.
+   * Every raw MCP tool name the board can call, in discovery order.
    *
    * Diagnostics only: the Jira panel's tool lookup is pattern-based, and when a
    * pattern misses, this is the one thing that says whether the server renamed
    * a tool or authorized none at all.
    */
   rawNames(): readonly string[] {
-    return [...this.#rawNames.values()]
+    return [...(this.#board ?? this.#model)?.raw.values() ?? []]
   }
 
   /**
-   * The tools this connection registered, with their server-supplied
-   * descriptions.
+   * Everything either session listed, with the descriptions the server sent.
    *
-   * The Settings page renders this as a searchable catalogue. It is the same
-   * generation `rawNames()` reads, so a tool cannot appear in the model's list
-   * and be missing here.
+   * The Settings page renders this as a searchable catalogue. `registered`
+   * separates the tools the model pays context for from the board-only ones, so
+   * a flat catalogue does not look like an accidentally huge context.
    */
   tools(): readonly BridgedTool[] {
-    return this.#toolInfo
+    if (this.#board === undefined || this.#board === this.#model) return this.#modelInfo
+    return [...this.#modelInfo, ...this.#boardInfo]
   }
 
   /**
@@ -304,10 +404,7 @@ export class AtlassianBridge {
    * @returns The raw name to pass to `tools/call`, or undefined when absent.
    */
   rawNameMatching(pattern: RegExp): string | undefined {
-    for (const raw of this.#rawNames.values()) {
-      if (pattern.test(raw)) return raw
-    }
-    return undefined
+    return findRawName(this.#board ?? this.#model, pattern)
   }
 
   /**
@@ -327,11 +424,11 @@ export class AtlassianBridge {
     args: Record<string, unknown>,
     timeoutMs?: number,
   ): Promise<readonly unknown[]> {
-    const client = this.#client
-    if (client === undefined || this.#status !== 'ready') {
+    const session = this.#board ?? this.#model
+    if (session === undefined || this.#status !== 'ready') {
       throw new Error('未连接 Atlassian — 请先到 设置 → Atlassian 完成连接')
     }
-    const result = (await client.callTool({ name: rawName, arguments: args }, undefined, {
+    const result = (await session.client.callTool({ name: rawName, arguments: args }, undefined, {
       timeout: timeoutMs ?? this.#options.toolCallTimeoutMs,
     })) as CallToolResult
     if (result.isError === true) throw new Error(extractText(result.content, rawName))
@@ -370,7 +467,7 @@ export class AtlassianBridge {
       fields: Omit<ConnectionTest, 'checkedAt' | 'durationMs'>,
     ): ConnectionTest => ({ checkedAt, durationMs: Date.now() - started, ...fields })
 
-    const client = this.#client
+    const client = (this.#model ?? this.#board)?.client
     if (client === undefined || this.#status !== 'ready') {
       return result({
         ok: false,
@@ -591,8 +688,8 @@ export class AtlassianBridge {
   #clearTools(): void {
     for (const dispose of this.#disposers.values()) dispose()
     this.#disposers = new Map()
-    this.#rawNames = new Map()
-    this.#toolInfo = []
+    this.#modelInfo = []
+    this.#boardInfo = []
   }
 
   /**
@@ -603,6 +700,10 @@ export class AtlassianBridge {
    * A second `UnauthorizedError` is not retried: at that point the code
    * exchange succeeded but the token was still refused, which no amount of
    * waiting will fix.
+   *
+   * The board's session is opened only after the model's is up, because the
+   * authorization both of them use is resolved by the model connection first.
+   * Its failure is not fatal: a broken panel must not cost the agent its tools.
    */
   async #run(openBrowser: boolean): Promise<void> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -610,43 +711,167 @@ export class AtlassianBridge {
       this.#error = undefined
       this.#notify()
 
-      const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION })
-      const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), {
-        authProvider: this.#provider,
+      const client = await this.#connect(openBrowser, attempt, () => {
+        this.#status = 'authorizing'
+        this.#notify()
       })
-      try {
-        await client.connect(transport)
-      } catch (error) {
-        await transport.close().catch(() => undefined)
-        if (error instanceof UnauthorizedError && attempt === 0) {
-          this.#status = 'authorizing'
-          this.#notify()
-          if (openBrowser) await this.#openAuthorizationPage()
-          const code = await this.#awaitAuthorizationCode()
-          await auth(this.#provider, {
-            serverUrl: this.#options.url,
-            authorizationCode: code,
-          })
-          // The verifier is single-use; leaving it around would let a stale
-          // value be replayed against a later authorization.
-          await this.#options.store.clear('codeVerifier')
-          continue
-        }
-        throw error
-      }
+      if (client === undefined) continue
 
-      this.#client = client
-      await this.#syncTools(client)
-      await this.#detectSite(client)
+      this.#model = { client, raw: new Map() }
+      // Before `#syncTools`: the board session is what the tool catalogue is
+      // enumerated from, so it has to exist first.
+      await this.#connectBoard()
+      await this.#syncTools(this.#model)
+      await this.#detectSite(this.#model)
       this.#authorizationUrl = undefined
       this.#status = 'ready'
       this.#notify()
       this.#host.logger.info(
-        `atlassian: connected to ${this.#options.url} — ${String(this.#disposers.size)} tool(s) registered`,
+        `atlassian: connected to ${this.#options.url} — ${String(this.#disposers.size)} tool(s) registered` +
+          (this.#board === this.#model
+            ? ''
+            : `, ${String(this.#board?.raw.size ?? 0)} board-only tool(s) from ${this.#options.boardUrl}`),
       )
       return
     }
     throw new Error('atlassian: authorization produced no usable connection')
+  }
+
+  /**
+   * Connect one MCP session, running the browser flow once when the server
+   * demands authorization.
+   *
+   * @param openBrowser - Whether to put the authorization page in front of the user.
+   * @param attempt - Attempt index; only the first may authorize.
+   * @param onAuthorize - Called as the flow starts, before the browser opens.
+   * @returns The connected client, or undefined to retry after authorizing.
+   */
+  async #connect(
+    openBrowser: boolean,
+    attempt: number,
+    onAuthorize: () => void,
+  ): Promise<Client | undefined> {
+    const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION })
+    const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), {
+      authProvider: this.#provider,
+    })
+    try {
+      await client.connect(transport)
+      return client
+    } catch (error) {
+      await transport.close().catch(() => undefined)
+      if (!(error instanceof UnauthorizedError) || attempt !== 0) throw error
+      onAuthorize()
+      if (openBrowser) await this.#openAuthorizationPage()
+      const code = await this.#awaitAuthorizationCode()
+      await auth(this.#provider, {
+        serverUrl: this.#options.url,
+        authorizationCode: code,
+      })
+      // The verifier is single-use; leaving it around would let a stale value be
+      // replayed against a later authorization.
+      await this.#options.store.clear('codeVerifier')
+      return undefined
+    }
+  }
+
+  /**
+   * Open the board's session, unless the model's session already is it.
+   *
+   * Both URLs address the same OAuth resource, so the access token the model
+   * connection just obtained is presented as-is; the SDK may still refresh it,
+   * which writes back to the one shared store.
+   */
+  async #connectBoard(): Promise<void> {
+    const model = this.#model
+    if (model === undefined) return
+    if (this.#options.boardUrl === this.#options.url) {
+      this.#board = model
+      return
+    }
+
+    const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION })
+    const transport = new StreamableHTTPClientTransport(new URL(this.#options.boardUrl), {
+      authProvider: this.#provider,
+    })
+    try {
+      await client.connect(transport)
+    } catch (error) {
+      await transport.close().catch(() => undefined)
+      // The panel degrades to the model's catalogue instead of taking the
+      // connection down with it; the missing-tool message it then shows is
+      // actionable, and this line says why.
+      this.#host.logger.warn(
+        `atlassian: board catalogue ${this.#options.boardUrl} is unavailable (${error instanceof Error ? error.message : String(error)}) — the Jira panel will fall back to the model's tools`,
+      )
+      this.#board = model
+      return
+    }
+    this.#board = { client, raw: new Map() }
+  }
+
+  /**
+   * Enumerate the board session's tools, then register the model's.
+   *
+   * Listing the board catalogue is what makes the panel's pattern lookup work
+   * against tools the model never sees; only the model's session is registered,
+   * so only its definitions enter the model's context.
+   */
+  async #syncTools(model: McpSession): Promise<void> {
+    const modelTools = await listAllTools(model.client)
+    const definitions = new Map<string, ToolDefinition>()
+    const info: BridgedTool[] = []
+    for (const tool of modelTools) {
+      const publicName = publicToolName(this.#options.serverName, tool.name)
+      if (definitions.has(publicName)) {
+        throw new Error(
+          `atlassian: server listed tool "${tool.name}" more than once — refusing an invalid tool list`,
+        )
+      }
+      definitions.set(
+        publicName,
+        this.#makeDefinition(model.client, publicName, tool.name, tool.description, tool.inputSchema),
+      )
+      model.raw.set(publicName, tool.name)
+      info.push({ name: publicName, rawName: tool.name, description: tool.description, registered: true })
+    }
+
+    // The board catalogue, when it is a different session. Every listed name is
+    // recorded in `board.raw` — the panel calls primary tools through this
+    // session too — but the display catalogue skips the ones already registered,
+    // so the Settings page never shows one tool twice.
+    const board = this.#board
+    const boardInfo: BridgedTool[] = []
+    if (board !== undefined && board !== model) {
+      for (const tool of await listAllTools(board.client)) {
+        const publicName = publicToolName(this.#options.serverName, tool.name)
+        if (board.raw.has(publicName)) continue
+        board.raw.set(publicName, tool.name)
+        if (definitions.has(publicName)) continue
+        boardInfo.push({
+          name: publicName,
+          rawName: tool.name,
+          description: tool.description,
+          registered: false,
+        })
+      }
+    }
+
+    for (const dispose of this.#disposers.values()) dispose()
+    const next = new Map<string, () => void>()
+    try {
+      for (const [publicName, definition] of definitions) {
+        next.set(publicName, this.#host.register(definition))
+      }
+    } catch (error) {
+      for (const dispose of next.values()) dispose()
+      throw new Error(`atlassian: tool registration failed, no tools registered: ${String(error)}`, {
+        cause: error,
+      })
+    }
+    this.#disposers = next
+    this.#modelInfo = info
+    this.#boardInfo = boardInfo
   }
 
   /**
@@ -702,53 +927,6 @@ export class AtlassianBridge {
     return callback.code
   }
 
-  /** Rebuild the tool generation and swap it in atomically. */
-  async #syncTools(client: Client): Promise<void> {
-    const definitions = new Map<string, ToolDefinition>()
-    const rawNames = new Map<string, string>()
-    const info: BridgedTool[] = []
-    const seenCursors = new Set<string>()
-    let cursor: string | undefined
-
-    do {
-      const response = await client.listTools(cursor === undefined ? {} : { cursor })
-      for (const tool of response.tools) {
-        const publicName = publicToolName(this.#options.serverName, tool.name)
-        if (definitions.has(publicName)) {
-          throw new Error(
-            `atlassian: server listed tool "${tool.name}" more than once — refusing an invalid tool list`,
-          )
-        }
-        definitions.set(publicName, this.#makeDefinition(client, publicName, tool.name, tool.description ?? '', tool.inputSchema))
-        rawNames.set(publicName, tool.name)
-        info.push({ name: publicName, rawName: tool.name, description: tool.description ?? '' })
-      }
-      cursor = response.nextCursor
-      if (cursor !== undefined) {
-        if (seenCursors.has(cursor)) {
-          throw new Error('atlassian: server repeated a tools/list continuation cursor — refusing an invalid tool list')
-        }
-        seenCursors.add(cursor)
-      }
-    } while (cursor !== undefined)
-
-    for (const dispose of this.#disposers.values()) dispose()
-    const next = new Map<string, () => void>()
-    try {
-      for (const [publicName, definition] of definitions) {
-        next.set(publicName, this.#host.register(definition))
-      }
-    } catch (error) {
-      for (const dispose of next.values()) dispose()
-      throw new Error(`atlassian: tool registration failed, no tools registered: ${String(error)}`, {
-        cause: error,
-      })
-    }
-    this.#disposers = next
-    this.#rawNames = rawNames
-    this.#toolInfo = info
-  }
-
   /** Build one tool definition over the live client. */
   #makeDefinition(
     client: Client,
@@ -802,15 +980,12 @@ export class AtlassianBridge {
    * the resources tool. This is intentionally non-fatal: a failure here costs
    * a site label, never the connection.
    */
-  async #detectSite(client: Client): Promise<void> {
-    const entry = [...this.#rawNames.entries()].find(([, raw]) =>
-      /accessibleatlassianresources/i.test(raw),
-    )
-    if (entry === undefined) return
-    const [publicName, rawName] = entry
+  async #detectSite(session: McpSession): Promise<void> {
+    const match = findRawName(session, /accessibleatlassianresources/i)
+    if (match === undefined) return
     try {
-      const result = (await client.callTool(
-        { name: rawName, arguments: {} },
+      const result = (await session.client.callTool(
+        { name: match, arguments: {} },
         undefined,
         { timeout: 20_000 },
       )) as CallToolResult
@@ -824,20 +999,26 @@ export class AtlassianBridge {
           `atlassian: authorized site "${site}" does not match the configured expectedSite "${expected}"`,
         )
       }
-      this.#host.logger.info(`atlassian: authorized site ${site} (via ${publicName})`)
+      this.#host.logger.info(`atlassian: authorized site ${site} (via ${match})`)
     } catch {
       // Site detection is cosmetic; the connection stands without it.
     }
   }
 
+  /** Close both sessions; a shared one is closed once. */
   async #teardownClient(): Promise<void> {
-    const client = this.#client
-    this.#client = undefined
-    if (client === undefined) return
-    try {
-      await client.close()
-    } catch {
-      // Closing a dead transport is not an error worth surfacing.
+    const model = this.#model
+    const board = this.#board
+    this.#model = undefined
+    this.#board = undefined
+    const clients = board === undefined || board === model ? [model] : [model, board]
+    for (const session of clients) {
+      if (session === undefined) continue
+      try {
+        await session.client.close()
+      } catch {
+        // Closing a dead transport is not an error worth surfacing.
+      }
     }
   }
 

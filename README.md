@@ -19,14 +19,25 @@ mcp__atlassian__searchConfluence
 DSH 自带的 `dsh-mcp-client` 不支持 OAuth；改用 API token 则每次工具调用都要显式传 `cloudId`。
 这个插件走 OAuth 2.1 补上这一段——站点由授权决定，不需要传 `cloudId`。
 
-插件连的是 Atlassian MCP **v2**：`https://mcp.atlassian.com/v2/mcp?tools=all`。v2 默认只下发少量
-primary 工具加 `discover` / `executeRead` / `executeWrite` / `executeDestructive`；`?tools=all`
-是官方给「需要平铺工具列表的客户端」的入口。本插件按 `tools/list` 逐条桥接成原生工具，看板还会
-直接按工具名调用，所以默认就用这个平铺入口。
+插件连的是 Atlassian MCP **v2**，并且**开两条连接**：
+
+| 连接 | 端点 | 用途 | 是否注册给 agent |
+|---|---|---|---|
+| 模型连接 | `https://mcp.atlassian.com/v2/mcp` | v2 默认只下发少量 primary 工具加 `discover` / `executeRead` / `executeWrite` / `executeDestructive` | **是** |
+| 看板连接 | `https://mcp.atlassian.com/v2/mcp?tools=all` | 平铺目录，看板按工具名直连（`listJiraProjects`、`getJiraBoardSprintData`…） | **否** |
+
+这么分是因为 `?tools=all` 的平铺目录有两百多个工具定义，全部注册进 agent 会让**每一次请求**都先花掉
+几万 token 的上下文。现在模型只看到 primary 那十来个，看板仍然能调用全部工具，两边共用同一份
+OAuth 授权（同一个资源，只是查询参数不同）。
+
+代价是：非 primary 的工具（`searchConfluence`、`listJiraIssueTransitions` 等）**模型不能直接按名字调用**，
+要先 `discover` 再 `executeRead`/`executeWrite`。想要回到「全部注册」的老行为，把 `boardUrl` 设成和
+`url` 一样、并给 `url` 带上 `?tools=all` 即可。
 
 v2 是**独立的 OAuth 资源**：授权服务器是 `auth.atlassian.com/<id>`，v1 的 client 注册和 token
 不能沿用。插件的授权文件按 URL 分文件保存，所以从 v1 升级后旧文件还在，但需要在设置页重新
-**连接 Atlassian** 一次。
+**连接 Atlassian** 一次。授权文件的键从 `…?tools=all` 变成了 `…/v2/mcp`，所以从「单连接」版本升级
+上来同样要重新授权一次。
 
 ## 兼容的 Harness 版本
 
@@ -191,22 +202,24 @@ Jira 工单状态**——状态流转由你在看板上点确认。自定义模�
 
 ## 会用到哪些工具
 
-授权成功后，`?tools=all` 平铺目录里的工具会以 `mcp__atlassian__<名称>` 出现在 agent 的工具列表
-里（Jira、Confluence、Bitbucket、Goals、Projects 等都会按 scope 加载，远不止下表这些）。
-实际可用的集合取决于你在授权站点里有权限访问的产品：
+授权成功后，`url`（默认端点）列出的 primary 工具会以 `mcp__atlassian__<名称>` 出现在 agent 的工具
+列表里；`boardUrl`（平铺目录）里的全部工具只供看板调用，设置页的「工具清单」会把它们标成 **仅看板**。
+两边实际可用的集合都取决于你在授权站点里有权限访问的产品：
 
-| 工具 | 用途 |
-|---|---|
-| `searchJiraIssuesUsingJql` | 用 JQL 搜索工单 |
-| `getJiraIssue` | 读取单个工单 |
-| `createJiraIssue` | 新建工单 |
-| `listJiraProjects` | 列出可见的 Jira 项目 |
-| `listJiraIssueTransitions` | 查看某个工单可用的状态流转 |
-| `searchConfluence` | 用 CQL 搜索 Confluence |
-| `getConfluenceContent` | 读取页面内容 |
-| `createConfluenceContent` / `updateConfluenceContent` | 新建 / 更新页面 |
-| `atlassianUserInfo` | 当前授权账号 |
-| `getAccessibleAtlassianResources` | 该授权可访问的站点 |
+| 工具 | 用途 | agent 可见 |
+|---|---|---|
+| `searchJiraIssuesUsingJql` | 用 JQL 搜索工单 | ✅ |
+| `getJiraIssue` | 读取单个工单 | ✅ |
+| `createJiraIssue` / `editJiraIssue` | 新建 / 编辑工单 | ✅ |
+| `atlassianUserInfo` | 当前授权账号 | ✅ |
+| `getAccessibleAtlassianResources` | 该授权可访问的站点 | ✅ |
+| `discover` + `executeRead`/`executeWrite` | 调用下面这些非 primary 能力 | ✅ |
+| `listJiraProjects` | 列出可见的 Jira 项目 | 仅看板 |
+| `listJiraIssueTransitions` | 查看某个工单可用的状态流转 | 仅看板 |
+| `getJiraBoardSprintData` | 冲刺目录与筛选（v2 没有 `listJiraBoards` / `listJiraBoardSprints`） | 仅看板 |
+| `searchConfluence` / `getConfluenceContent` 等 | Confluence 读写 | 经 `discover` |
+
+> 具体哪些名字算 primary 由 Atlassian 决定，会随站点权限变化；以设置页「工具清单」的实际标注为准。
 
 ## 配置
 
@@ -216,7 +229,8 @@ Jira 工单状态**——状态流转由你在看板上点确认。自定义模�
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `serverName` | `atlassian` | 工具名前缀：`mcp__<serverName>__<tool>` |
-| `url` | `https://mcp.atlassian.com/v2/mcp?tools=all` | MCP v2 平铺工具入口；`?tools=all` 去掉后只剩 primary 工具 |
+| `url` | `https://mcp.atlassian.com/v2/mcp` | **模型**连接；默认端点只有 primary 工具，上下文最小 |
+| `boardUrl` | `https://mcp.atlassian.com/v2/mcp?tools=all` | **看板**连接；平铺目录，不注册给 agent。设成与 `url` 相同即回到「全部注册」的老行为 |
 | `redirectPort` | `3334` | OAuth 回调端口，尽量保持不变 |
 | `expectedSite` | 空 | 填了会在授权后校验站点，不一致时提示 |
 | `autoOpenBrowser` | `true` | 点「连接 Atlassian」时自动打开浏览器 |
@@ -294,8 +308,11 @@ v2 是独立的 OAuth 资源，v1 的 client 注册和 token 不能沿用。插�
 - 图片结果渲染为占位文本
 - 设置页的导航图标是就地补丁（DSH 没提供图标接口），匹配不上时保持默认齿轮
 - 未对 `expectedSite` 不匹配做硬阻断
-- 走 `?tools=all` 平铺目录，没有使用 v2 的 `discover` / `execute*` 延迟发现模式；因此授权同意页会
-  按资源公布的 scope 全量申请，工具列表也随授权站点开通的产品变长
+- 模型侧没有实现 v2 的 `discover` → `execute*` 编排：`discover` / `executeRead` / `executeWrite` /
+  `executeDestructive` 作为普通工具交给模型，怎么串由模型自己决定。因此非 primary 能力必须经这三步，
+  不能按名字直接调
+- 看板连接失败时（端点变化、网络问题）不会拖垮 agent 的工具，但面板会退回模型连接的工具集，此时
+  项目 / 冲刺 / 流转这些功能会不可用；日志里有一条 `board catalogue … is unavailable`
 - JSM 工具在 v2 里只支持 API token 认证，本插件只走 OAuth，所以不会加载 JSM 工具
 
 ## 开发

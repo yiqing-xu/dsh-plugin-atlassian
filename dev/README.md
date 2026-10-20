@@ -140,16 +140,20 @@ PKCE、loopback 回调端口全部就绪——剩下的只有浏览器里点批�
 
 ## 不启动进程的回归脚本
 
-五个 harness 直接跑**编译产物**，不需要授权也不需要浏览器：
+六个 harness 直接跑**编译产物**，不需要授权也不需要浏览器：
 
 ```powershell
 npm run build
-node dev/verify-board.mjs          # lib/board.js：字段映射、JQL 回退、流转、错误路径
-node dev/verify-client-bundle.mjs  # lib/client.js：槽位注册契约、侧边栏开关、主题与看板缓存策略
-node dev/verify-token-test.mjs     # lib/bridge.js：测试连接的成功、并发与 token 失效路径
-node dev/verify-prefs.mjs          # lib/prefs.js：偏好文档与 /prefs 端点
+node dev/verify-board.mjs            # lib/board.js：字段映射、JQL 回退、流转、错误路径
+node dev/verify-client-bundle.mjs    # lib/client.js：槽位注册契约、侧边栏开关、主题与看板缓存策略
+node dev/verify-token-test.mjs       # lib/bridge.js：测试连接的成功、并发与 token 失效路径
+node dev/verify-catalogue-split.mjs  # lib/bridge.js：模型连接只注册 primary，看板连接能调平铺目录
+node dev/verify-prefs.mjs            # lib/prefs.js：偏好文档与 /prefs 端点
 node dev/verify-direct-search.mjs <临时目录>   # 真 DOM 里挂面板，输入编号/链接并回车
 ```
+
+`verify-catalogue-split.mjs` 起两个假 MCP 服务（`/mcp` 只给 primary，`/mcp?tools=all` 给平铺目录），
+断言模型侧只注册前者、看板仍能按名字调用后者、设置页目录里后者被标成「仅看板」且不重复出现。
 
 `verify-direct-search.mjs` 用 `react-dom` + `jsdom` 真正**挂载看板面板**，然后往搜索框里输入
 编号和 Jira 链接、按回车、按 Escape——这是唯一能在没有授权的情况下覆盖「用户到底怎么用这个

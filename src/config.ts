@@ -14,14 +14,25 @@ export interface Config {
    */
   serverName: string
   /**
-   * Atlassian remote MCP endpoint (Streamable HTTP).
+   * Atlassian remote MCP endpoint the MODEL sees (Streamable HTTP).
    *
-   * v2 exposes only a small primary tool set plus discover/execute unless the
-   * flat catalogue is requested, so the default carries `?tools=all`: this
-   * plugin bridges each `tools/list` entry to a native tool, and the Jira board
-   * also calls the raw names directly.
+   * Deliberately the v2 default, without `?tools=all`: that endpoint lists only
+   * the primary tools plus `discover` / `executeRead` / `executeWrite` /
+   * `executeDestructive`, which is the whole point — a flat catalogue of ~200
+   * definitions costs tens of thousands of tokens on every request. The board's
+   * tools come from {@link boardUrl} instead.
    */
   url: string
+  /**
+   * Endpoint whose `tools/list` feeds the Jira board, never the model.
+   *
+   * `?tools=all` is the flat catalogue: the board calls tools by name
+   * (`listJiraProjects`, `getJiraBoardSprintData`, …) and most of those are
+   * deferred on the default endpoint, so they must be enumerated somewhere that
+   * does not pay the token cost. Empty reuses {@link url} — one connection, the
+   * pre-0.2 behaviour.
+   */
+  boardUrl: string
   /**
    * Loopback port for the OAuth redirect URI. `0` picks a free port.
    *
@@ -99,7 +110,11 @@ export interface BoardConfig {
 
 export const Config = z.object({
   serverName: z.string().default('atlassian'),
-  url: z.string().default('https://mcp.atlassian.com/v2/mcp?tools=all'),
+  url: z.string().default('https://mcp.atlassian.com/v2/mcp'),
+  // The board's flat catalogue. Same OAuth resource (`/v2/mcp`), only the query
+  // differs, so the two connections share one authorization and one store file
+  // keyed by `url` — see `store.ts`.
+  boardUrl: z.string().default('https://mcp.atlassian.com/v2/mcp?tools=all'),
   redirectPort: z.number().step(1).min(0).max(65535).default(3334),
   toolCallTimeoutMs: z.number().step(1).min(1).default(60000),
   expectedSite: z.string().default(''),

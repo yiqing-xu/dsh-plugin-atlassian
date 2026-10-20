@@ -45,6 +45,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     {
       serverName: config.serverName,
       url: config.url,
+      boardUrl: config.boardUrl,
       redirectPort: config.redirectPort,
       toolCallTimeoutMs: config.toolCallTimeoutMs,
       expectedSite: config.expectedSite,

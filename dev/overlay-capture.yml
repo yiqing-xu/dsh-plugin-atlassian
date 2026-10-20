@@ -22,7 +22,11 @@
     # (serverName, url), and this profile keeps its own copy of the
     # authorization so a capture run can never disturb the daily one.
     serverName: atlassian-dev
-    url: https://mcp.atlassian.com/v2/mcp?tools=all
+    # Same split as the shipped patch: primary tools for the model, the flat
+    # catalogue only for the board. The captured Settings page therefore shows
+    # a small "已注册" count plus the board-only remainder.
+    url: https://mcp.atlassian.com/v2/mcp
+    boardUrl: https://mcp.atlassian.com/v2/mcp?tools=all
     redirectPort: 3340
     expectedSite: ''
     toolCallTimeoutMs: 60000

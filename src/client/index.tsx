@@ -221,6 +221,8 @@ interface BridgedTool {
   name: string
   rawName: string
   description: string
+  /** `false` for a tool only the board's catalogue knows. */
+  registered: boolean
 }
 
 const TEST_LABEL: Record<ConnectionTestVerdict, string> = {
@@ -1558,6 +1560,14 @@ function AtlassianSettings(): React.ReactElement {
     )
   }, [tools, toolQuery])
 
+  // The catalogue can be larger than the registered set: with a separate board
+  // endpoint the panel reads the flat `?tools=all` catalogue while the agent
+  // only sees (and pays context for) the primary tools.
+  const boardOnlyCount = React.useMemo(
+    () => (tools ?? []).filter((tool) => !tool.registered).length,
+    [tools],
+  )
+
   // Losing every tool (disconnect, or a probe that invalidated the token) makes
   // an open catalogue describe a generation that no longer exists.
   React.useEffect(() => {
@@ -1784,7 +1794,9 @@ function AtlassianSettings(): React.ReactElement {
             { key: 'sub', style: { marginTop: 2, fontSize: '0.8em', opacity: 0.62 } },
             toolCount === 0
               ? '连接后这里会列出服务端提供的全部工具及说明。'
-              : `共 ${String(toolCount)} 个工具，展开后可搜索名称与说明。`,
+              : boardOnlyCount === 0
+                ? `共 ${String(toolCount)} 个工具，全部已注册给 agent，展开后可搜索名称与说明。`
+                : `agent 已注册 ${String(toolCount)} 个；另有 ${String(boardOnlyCount)} 个仅看板可用（未注册给 agent，不占上下文）。`,
           ),
         ),
         LI(
@@ -1874,6 +1886,10 @@ function AtlassianSettings(): React.ReactElement {
                               key: 'name',
                               title: tool.rawName,
                               style: {
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap',
                                 fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                                 fontSize: '0.8em',
                                 fontWeight: 600,
@@ -1881,6 +1897,26 @@ function AtlassianSettings(): React.ReactElement {
                               },
                             },
                             tool.name,
+                            tool.registered
+                              ? null
+                              : LI(
+                                  'span',
+                                  {
+                                    key: 'board-only',
+                                    title: '该工具只出现在看板的目录里，agent 看不到它，因此不占上下文。',
+                                    style: {
+                                      flex: 'none',
+                                      padding: '1px 6px',
+                                      borderRadius: 999,
+                                      border: `1px solid ${C.borderSoft}`,
+                                      fontFamily: 'inherit',
+                                      fontSize: '0.9em',
+                                      fontWeight: 500,
+                                      opacity: 0.7,
+                                    },
+                                  },
+                                  '仅看板',
+                                ),
                           ),
                           LI(
                             'div',

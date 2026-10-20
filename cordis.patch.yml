@@ -12,17 +12,28 @@
       name: dsh-plugin-atlassian
       config:
         serverName: atlassian
-        # Atlassian MCP v2. `?tools=all` asks for the paginated flat tool
-        # catalogue: v2 otherwise exposes only a handful of primary tools plus
-        # discover/executeRead/executeWrite/executeDestructive, while this plugin
-        # bridges each `tools/list` entry to a native tool and the Jira board
-        # calls raw tool names directly.
+        # Atlassian MCP v2 — the DEFAULT endpoint, i.e. the small primary tool
+        # set plus `discover` / `executeRead` / `executeWrite` /
+        # `executeDestructive`. Deliberately NOT `?tools=all`: that flat
+        # catalogue is ~200 tool definitions, which is tens of thousands of
+        # tokens of context on every single request.
         #
         # v2 is a separate OAuth resource from v1: its authorization server is
         # `auth.atlassian.com/<id>` and a v1 client registration/token cannot be
         # reused. The session file is keyed by this URL, so switching endpoints
         # starts a clean registration rather than silently reusing v1 state.
-        url: https://mcp.atlassian.com/v2/mcp?tools=all
+        url: https://mcp.atlassian.com/v2/mcp
+        # The Jira board needs tools that the default endpoint only exposes as
+        # deferred (`listJiraProjects`, `getJiraBoardSprintData`,
+        # `listJiraIssueTransitions`, …) and it calls them by name, so it reads
+        # the flat catalogue on its own connection. Nothing from this endpoint
+        # is registered for the model — it costs the panel a `tools/list`, not
+        # the agent any context. Same OAuth resource as `url`, so the two share
+        # one authorization.
+        #
+        # Set this equal to `url` to run one connection that behaves exactly
+        # like the pre-0.2 release (every tool registered, large context).
+        boardUrl: https://mcp.atlassian.com/v2/mcp?tools=all
         # Loopback port for the OAuth redirect URI. Must stay stable across
         # restarts: the dynamic client registration binds this exact URI, and
         # a changed port invalidates the stored client registration.

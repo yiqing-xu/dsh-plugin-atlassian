@@ -21,15 +21,28 @@ The DSH built-in `dsh-mcp-client` has no OAuth support, and API-token auth force
 `cloudId` on every tool call. This plugin supplies the missing piece over OAuth 2.1 — the site
 follows from the authorization, so no `cloudId` is ever passed.
 
-The plugin speaks Atlassian MCP **v2**: `https://mcp.atlassian.com/v2/mcp?tools=all`. By default v2
-only exposes a small primary tool set plus `discover` / `executeRead` / `executeWrite` /
-`executeDestructive`; `?tools=all` is the official entry point for clients that need a flat tool
-list. This plugin bridges each `tools/list` entry into a native tool and the Jira board also calls
-raw names, so it uses the flat catalogue.
+The plugin speaks Atlassian MCP **v2** over **two connections**:
+
+| Connection | Endpoint | Purpose | Registered for the agent |
+|---|---|---|---|
+| model | `https://mcp.atlassian.com/v2/mcp` | v2 default: a small primary tool set plus `discover` / `executeRead` / `executeWrite` / `executeDestructive` | **yes** |
+| board | `https://mcp.atlassian.com/v2/mcp?tools=all` | the paginated flat catalogue; the Jira board calls those raw names directly | **no** |
+
+The split exists because the flat catalogue holds 200+ tool definitions: registering all of them
+spends tens of thousands of context tokens on *every* request. The model now sees the dozen or so
+primary tools, the board still reaches the whole catalogue, and both connections share one
+authorization (same OAuth resource, only the query differs).
+
+The cost: non-primary capabilities (`searchConfluence`, `listJiraIssueTransitions`, …) are not
+callable by name from the model — it has to go through `discover` and then `executeRead` /
+`executeWrite`. To restore the old "register everything" behaviour, set `boardUrl` equal to `url` and
+put `?tools=all` back on `url`.
 
 v2 is a **separate OAuth resource**: its authorization server is `auth.atlassian.com/<id>`, and a v1
 client registration or token cannot be reused. Session files are keyed by URL, so the old one is
-kept; you just need to click **Connect Atlassian** once after upgrading.
+kept; you just need to click **Connect Atlassian** once after upgrading. The key also moved from
+`…?tools=all` to `…/v2/mcp`, so upgrading from the single-connection release needs one
+re-authorization too.
 
 ## Supported Harness versions
 
@@ -217,23 +230,26 @@ dragged and opens the same menu for you to confirm the target.
 
 ## Tools you will get
 
-After authorizing, the tools in the `?tools=all` flat catalogue appear in the agent's tool list as
-`mcp__atlassian__<name>` (Jira, Confluence, Bitbucket, Goals, Projects and more, loaded according to
-the scopes granted — the table below is only the common subset). Which ones are actually available
-depends on the products you can reach on the site you authorized:
+After authorizing, the primary tools listed by `url` (the default endpoint) appear in the agent's tool
+list as `mcp__atlassian__<name>`. Everything else in `boardUrl` (the flat catalogue) is for the Jira
+board only; Settings marks those entries **board only**. Which ones are actually available depends on
+the products you can reach on the site you authorized:
 
-| Tool | Purpose |
-|---|---|
-| `searchJiraIssuesUsingJql` | Search issues with JQL |
-| `getJiraIssue` | Read a single issue |
-| `createJiraIssue` | Create an issue |
-| `listJiraProjects` | List the Jira projects you can see |
-| `listJiraIssueTransitions` | List the available status transitions for an issue |
-| `searchConfluence` | Search Confluence with CQL |
-| `getConfluenceContent` | Read a page |
-| `createConfluenceContent` / `updateConfluenceContent` | Create / update a page |
-| `atlassianUserInfo` | The authorized account |
-| `getAccessibleAtlassianResources` | The sites this authorization can reach |
+| Tool | Purpose | Agent can call it |
+|---|---|---|
+| `searchJiraIssuesUsingJql` | Search issues with JQL | ✅ |
+| `getJiraIssue` | Read a single issue | ✅ |
+| `createJiraIssue` / `editJiraIssue` | Create / edit an issue | ✅ |
+| `atlassianUserInfo` | The authorized account | ✅ |
+| `getAccessibleAtlassianResources` | The sites this authorization can reach | ✅ |
+| `discover` + `executeRead`/`executeWrite` | Reach every non-primary capability below | ✅ |
+| `listJiraProjects` | List the Jira projects you can see | board only |
+| `listJiraIssueTransitions` | List the available status transitions for an issue | board only |
+| `getJiraBoardSprintData` | Sprint catalogue and filtering (v2 has no `listJiraBoards` / `listJiraBoardSprints`) | board only |
+| `searchConfluence` / `getConfluenceContent` etc. | Confluence reads and writes | via `discover` |
+
+> Which names count as primary is Atlassian's call and follows your site's permissions; trust the
+> **board only** markers in the Settings tool list.
 
 ## Configuration
 
@@ -243,7 +259,8 @@ The defaults work out of the box. To change one, override by `id: atlassian` in 
 | Field | Default | Meaning |
 |---|---|---|
 | `serverName` | `atlassian` | Tool-name prefix: `mcp__<serverName>__<tool>` |
-| `url` | `https://mcp.atlassian.com/v2/mcp?tools=all` | MCP v2 flat tool catalogue; dropping `?tools=all` leaves only the primary tools |
+| `url` | `https://mcp.atlassian.com/v2/mcp` | The **model** connection; the default endpoint lists only the primary tools, which is the smallest context |
+| `boardUrl` | `https://mcp.atlassian.com/v2/mcp?tools=all` | The **board** connection; flat catalogue, never registered for the agent. Set it equal to `url` to register everything again |
 | `redirectPort` | `3334` | OAuth callback port — keep it stable |
 | `expectedSite` | empty | When set, the authorized site is checked and a mismatch reported |
 | `autoOpenBrowser` | `true` | Open the browser when **Connect Atlassian** is clicked |
@@ -322,9 +339,12 @@ notice, not a block.**
 - The Settings nav icon is patched in place (DSH exposes no icon interface); if the patch does not
   match, the default gear stays
 - A `expectedSite` mismatch is not a hard block
-- The flat `?tools=all` catalogue is used instead of v2's deferred `discover` / `execute*` mode, so
-  consent covers every scope the resource publishes and the tool list grows with the products the
-  authorized site exposes
+- The plugin does not implement v2's `discover` → `execute*` orchestration: those four tools are
+  handed to the model as ordinary tools and the model decides how to chain them, so a non-primary
+  capability cannot be called by name
+- If the board connection fails (moved endpoint, network), the agent keeps its tools but the panel
+  falls back to the model's tool set, where projects, sprints and transitions are unavailable; the
+  log carries a `board catalogue … is unavailable` line
 - JSM tools only support API-token auth in v2; this plugin is OAuth-only, so JSM tools are not loaded
 
 ## Development

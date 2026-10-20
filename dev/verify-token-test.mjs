@@ -141,6 +141,9 @@ const bridge = new AtlassianBridge(
   {
     serverName: 'probe-test',
     url: `http://127.0.0.1:${port}/mcp`,
+    // One connection for both halves: this script is about the probe. The
+    // split-catalogue behaviour has its own script (verify-catalogue-split.mjs).
+    boardUrl: `http://127.0.0.1:${port}/mcp`,
     redirectPort: 0,
     toolCallTimeoutMs: 5000,
     expectedSite: '',
