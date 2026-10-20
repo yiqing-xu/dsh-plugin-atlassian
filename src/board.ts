@@ -24,6 +24,11 @@ import type { AtlassianBridge } from './bridge.js'
  * `listJiraProjects`, and `getTransitionsForJiraIssue` became
  * `listJiraIssueTransitions`. The search/issue/transition tools kept their
  * names.
+ *
+ * The sprint catalogue is the exception: v2 has NO board-listing tool and no
+ * standalone sprint-list tool. `getJiraBoardSprintData` is the one that both
+ * resolves a project's board and answers its whole sprint catalogue, so it is
+ * what the panel asks — see {@link JiraBoard.sprints}.
  */
 const TOOL = {
   resources: /accessibleatlassianresources/i,
@@ -33,8 +38,7 @@ const TOOL = {
   transition: /^transitionJiraIssue$/i,
   projects: /^listJiraProjects$/i,
   fieldMeta: /^getJiraIssueTypeMetaWithFields$/i,
-  boards: /^listJiraBoards$/i,
-  sprints: /^listJiraBoardSprints$/i,
+  boardSprints: /^getJiraBoardSprintData$/i,
 } as const
 
 /** Compile every pattern once, so a fragment matches case-insensitively. */
@@ -46,8 +50,7 @@ const MATCHERS: Record<keyof typeof TOOL, RegExp> = {
   transition: new RegExp(TOOL.transition.source, 'i'),
   projects: new RegExp(TOOL.projects.source, 'i'),
   fieldMeta: new RegExp(TOOL.fieldMeta.source, 'i'),
-  boards: new RegExp(TOOL.boards.source, 'i'),
-  sprints: new RegExp(TOOL.sprints.source, 'i'),
+  boardSprints: new RegExp(TOOL.boardSprints.source, 'i'),
 }
 
 /**
@@ -59,6 +62,24 @@ const MATCHERS: Record<keyof typeof TOOL, RegExp> = {
  * so it is the fallback whenever the deployment did not pin one.
  */
 const DEFAULT_SPRINT_FIELD = 'customfield_10020'
+
+/**
+ * Server refusals that mean "this board has no sprints" rather than "failed".
+ *
+ * A kanban board genuinely holds none, so the filter row shows nothing instead
+ * of an error banner the user can do nothing about. Matched on the server's own
+ * wording because the tool reports it as a plain message with a 400, not as a
+ * distinct code.
+ */
+const NO_SPRINT_CATALOGUE = /此面板不支持冲刺|does not support sprints/i
+
+/**
+ * Server refusals that mean "no board matched", not "the request failed".
+ *
+ * A project whose boards are all team-managed or unknown produces this, and the
+ * filter row shows nothing rather than an error the user cannot act on.
+ */
+const NO_BOARD = /No Jira board matched|没有找到有密钥/i
 
 /**
  * The tool surface this module needs.
@@ -1020,73 +1041,46 @@ export class JiraBoard {
    *
    * A sprint is not a boolean: "is it in a sprint" is a property of an issue,
    * but what a filter row offers is the site's sprint CATALOGUE — RD003 alone
-   * runs 160 of them across its boards. So this walks the project's boards and
-   * lists every sprint on each, closed ones included, because a chip the user
-   * remembers from last quarter has to be selectable even after the page no
-   * longer shows any of its issues.
+   * runs 160 of them. The closed ones stay selectable even after the page no
+   * longer shows any of their issues, which is exactly what deriving the list
+   * from the loaded page misses.
    *
-   * Boards are listed even when the project has several (a site often keeps one
-   * per team plus a legacy board); the union is what is returned, de-duplicated
-   * by sprint id, and each option remembers the board it came from.
+   * v2 has no board-listing tool and no standalone sprint-list tool (the
+   * descriptions of `getJiraBoardConfig` and `getJiraBoardSprintData` still
+   * mention `listJiraBoards` / `listJiraBoardSprints`, but the server does not
+   * expose either). What does exist is `getJiraBoardSprintData`, which resolves
+   * a board from a project key and answers that board's whole sprint list in
+   * one call — so that is what this asks.
+   *
+   * A project with several boards is ambiguous to that tool, and its refusal
+   * names the candidates by id. Those ids are followed rather than surfaced, so
+   * the union is returned the way it was when the project's boards could be
+   * enumerated.
    */
   async sprints(projectKey: string, timeoutMs: number): Promise<readonly BoardSprintOption[]> {
-    const cloudId = await this.cloudId()
     const key = projectKey.trim()
     if (key === '') return []
-    const boardsContent = await this.#call(
-      MATCHERS.boards,
-      { cloudId, projectKeyOrId: key, maxResults: 50 },
-      timeoutMs,
-    )
-    const boards = parseJson(boardsContent, `读取 ${key} 的面板`)
-    const boardList = at(boards, 'values') ?? (Array.isArray(boards) ? boards : undefined)
-    const boardsFound = Array.isArray(boardList) ? boardList : []
+    const cloudId = await this.cloudId()
+
+    // One board's answer, or why it refused. `includeIssues: false` keeps this
+    // a metadata read: the panel wants names to filter by, not the issues.
+    const ask = async (args: Record<string, unknown>): Promise<unknown> => {
+      const content = await this.#call(
+        MATCHERS.boardSprints,
+        { cloudId, includeIssues: false, ...args },
+        timeoutMs,
+      )
+      return parseJson(content, `读取 ${key} 的面板冲刺`)
+    }
 
     const out: BoardSprintOption[] = []
     const seen = new Set<string>()
-    // A project's boards are few, so they are asked in parallel: a serial walk
-    // would add one round-trip per board to a filter row's opening.
-    interface BoardSprints {
-      boardId: string
-      boardName: string | undefined
-      rows: readonly unknown[]
-    }
-    const results = await Promise.all(
-      boardsFound.map(async (board): Promise<BoardSprints | undefined> => {
-        const boardId = idText(at(board, 'id'))
-        if (boardId === undefined) return undefined
-        const rows: unknown[] = []
-        try {
-          // The tool caps a page at 50 regardless of `maxResults`, and a long
-          // running board really does hold more (RD003's oldest board lists
-          // 160). Page through it, bounded so a pathological board cannot hold
-          // the filter row open forever.
-          const MAX_PAGES = 8
-          for (let page = 0; page < MAX_PAGES; page += 1) {
-            const content = await this.#call(
-              MATCHERS.sprints,
-              { cloudId, boardId: Number(boardId), state: 'all', maxResults: 100, startAt: page * 50 },
-              timeoutMs,
-            )
-            const parsed = parseJson(content, `读取面板 ${boardId} 的冲刺`)
-            const source = at(parsed, 'values') ?? (Array.isArray(parsed) ? parsed : undefined)
-            if (!Array.isArray(source) || source.length === 0) break
-            rows.push(...source)
-            // `isLast` is authoritative; a short page is the fallback signal for
-            // a server that omits it.
-            if (at(parsed, 'isLast') === true || source.length < 50) break
-          }
-        } catch {
-          // A board the token can see but not read (a private team board) must
-          // not fail the whole list: the other boards still answer, and whatever
-          // this board already yielded is still usable.
-        }
-        return { boardId, boardName: textAt(board, 'name'), rows }
-      }),
-    )
-    for (const result of results) {
-      if (result === undefined) continue
-      for (const raw of result.rows) {
+    const collect = (parsed: unknown): void => {
+      const boardId = idText(at(parsed, 'board', 'id'))
+      const boardName = textAt(parsed, 'board', 'name')
+      const rows = at(parsed, 'sprints')
+      if (!Array.isArray(rows)) return
+      for (const raw of rows) {
         const id = idText(at(raw, 'id'))
         if (id === undefined || seen.has(id)) continue
         seen.add(id)
@@ -1096,11 +1090,68 @@ export class JiraBoard {
           state: (textAt(raw, 'state') ?? '').toLowerCase(),
           startDate: textAt(raw, 'startDate'),
           endDate: textAt(raw, 'endDate'),
-          boardId: result.boardId,
-          boardName: result.boardName,
+          boardId,
+          boardName,
         })
       }
     }
+
+    let firstError: string | undefined
+    try {
+      collect(await ask({ projectKeyOrId: key }))
+      return out
+    } catch (error) {
+      // A missing tool is a deployment problem, not an answer about this
+      // project, so it must not be swallowed by the empty-catalogue path.
+      if (error instanceof BoardError && error.code === 'missing-tool') throw error
+      firstError = error instanceof Error ? error.message : String(error)
+    }
+
+    // "Multiple Jira boards matched: PICDLY面板 (#2, PICDLY), SaaS-BUG (#1216,
+    // PICDLY)." — the ids are the only part relied on; each response carries its
+    // own board name, so a renamed project needs no parsing.
+    const boardIdsOf = (message: string): string[] =>
+      [...message.matchAll(/#(\d+)/g)].flatMap((match) => (match[1] === undefined ? [] : [match[1]]))
+
+    let boardIds = boardIdsOf(firstError)
+    if (boardIds.length === 0) {
+      if (!NO_SPRINT_CATALOGUE.test(firstError)) {
+        // A project that does not exist, a filter that matched nothing the
+        // caller can read: this is a failure, not an empty catalogue.
+        throw new BoardError('tool-failed', firstError)
+      }
+      // The default resolution landed on a board that holds no sprints — a
+      // kanban one, or a legacy board a scrum project keeps alongside its real
+      // board. Narrowing to scrum either answers, names the candidates, or
+      // proves there is nothing to filter by.
+      try {
+        collect(await ask({ projectKeyOrId: key, boardType: 'CMPScrum' }))
+        return out
+      } catch (error) {
+        if (error instanceof BoardError && error.code === 'missing-tool') throw error
+        const message = error instanceof Error ? error.message : String(error)
+        boardIds = boardIdsOf(message)
+        // No board at all, or none of them scrum: an empty filter row is the
+        // honest answer rather than an error the user cannot act on.
+        if (boardIds.length === 0 && (NO_SPRINT_CATALOGUE.test(message) || NO_BOARD.test(message))) {
+          return []
+        }
+        if (boardIds.length === 0) throw new BoardError('tool-failed', message)
+      }
+    }
+
+    const answers = await Promise.all(
+      boardIds.map(async (boardId) => {
+        try {
+          return await ask({ boardId })
+        } catch {
+          // A kanban board among scrum ones is ordinary and must not cost the
+          // caller the boards that do answer.
+          return undefined
+        }
+      }),
+    )
+    for (const answer of answers) if (answer !== undefined) collect(answer)
     return out
   }
 }

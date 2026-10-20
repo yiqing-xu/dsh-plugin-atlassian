@@ -137,8 +137,7 @@ const TOOL_NAMES = {
   transition: 'transitionJiraIssue',
   projects: 'listJiraProjects',
   fieldMeta: 'getJiraIssueTypeMetaWithFields',
-  boards: 'listJiraBoards',
-  sprints: 'listJiraBoardSprints',
+  boardSprints: 'getJiraBoardSprintData',
 }
 
 /**
@@ -407,12 +406,16 @@ check(
 // The sprint CATALOGUE. A sprint is a named option on a project ("镇海炼化冲刺
 // 15.5"), and a project can run well over a hundred, so the panel asks the
 // server for the list instead of deriving it from the page it happens to hold.
+//
+// v2 exposes `getJiraBoardSprintData` and nothing else for this: there is no
+// `listJiraBoards`, and a project with several boards is refused as ambiguous.
+// These doubles reproduce both shapes the real server answers with.
 console.log('\nboard.sprints()')
 const SPRINTS_BY_BOARD = {
   63: {
     data: {
-      isLast: true,
-      values: [
+      board: { id: 63, name: '项目需求开发RD003面板', type: 'scrum' },
+      sprints: [
         { id: 3002, name: '中海油零库存信创部署', state: 'closed', endDate: '2025-11-11T10:00:00.000Z' },
         { id: 5777, name: '中海油备件零库存 lkc_8', state: 'closed', endDate: '2026-06-18T10:00:00.000Z' },
         { id: 5603, name: '中海油备件零库存 lkc_9', state: 'future' },
@@ -422,8 +425,8 @@ const SPRINTS_BY_BOARD = {
   },
   1117: {
     data: {
-      isLast: true,
-      values: [
+      board: { id: 1117, name: 'lkc', type: 'scrum' },
+      sprints: [
         // Duplicated with board 63 on purpose: the same sprint is offered by
         // both boards, and the chip row must not show it twice.
         { id: 6001, name: '镇海炼化冲刺15.5', state: 'active' },
@@ -431,26 +434,20 @@ const SPRINTS_BY_BOARD = {
       ],
     },
   },
-  999: 'boom',
 }
+/** The refusal the real server sends for a project with more than one board. */
+const AMBIGUOUS = new Error(
+  'Multiple Jira boards matched: 项目需求开发RD003面板 (#63, RD003), lkc (#1117, RD003). ' +
+    'Multiple boards could satisfy an active sprint. Provide boardId or boardName to disambiguate.',
+)
 const catalogueBridge = {
   rawNameMatching: bridge.rawNameMatching,
   async callTool(rawName, args) {
     if (rawName === 'getAccessibleAtlassianResources') return block(RESOURCES)
-    if (rawName === 'listJiraBoards') {
-      return block({
-        data: {
-          values: [
-            { id: 1117, name: 'lkc', type: 'scrum' },
-            { id: 63, name: '项目需求开发RD003面板', type: 'scrum' },
-            { id: 999, name: 'private board', type: 'scrum' },
-          ],
-        },
-      })
-    }
-    if (rawName === 'listJiraBoardSprints') {
+    if (rawName === 'getJiraBoardSprintData') {
+      if (args.boardId === undefined) throw AMBIGUOUS
       const answer = SPRINTS_BY_BOARD[args.boardId]
-      if (answer === 'boom') throw new Error('403 no permission')
+      if (answer === undefined) throw new Error('403 no permission')
       return block(answer)
     }
     return block('{}')
@@ -483,38 +480,73 @@ check(
   JSON.stringify(catalogue.find((sprint) => sprint.id === '4773')),
 )
 
-// No project means nothing to list, and the endpoint is asked with one always.
-check('an empty project lists nothing', (await new JiraBoard(catalogueBridge).sprints('   ', 5000)).length === 0)
-
-// The sprint tool caps a page at 50 no matter what `maxResults` says, and a long
-// running board really holds more than that (RD003's oldest board lists 160), so
-// the list has to be paged. A single request would silently hide most sprints.
-console.log('\nsprint paging')
-const LONG_BOARD = 250
-const pagedCalls = []
-const pagingBridge = {
+// One board answers directly: no ambiguity, so no second round-trip is spent.
+const singleBridge = {
   rawNameMatching: bridge.rawNameMatching,
+  calls: [],
   async callTool(rawName, args) {
     if (rawName === 'getAccessibleAtlassianResources') return block(RESOURCES)
-    if (rawName === 'listJiraBoards') return block({ data: { values: [{ id: 63, name: 'big board' }] } })
-    if (rawName === 'listJiraBoardSprints') {
-      pagedCalls.push(args.startAt ?? 0)
-      const startAt = Number(args.startAt ?? 0)
-      // The server ignores `maxResults` and serves 50 at a time.
-      const values = []
-      for (let index = startAt; index < Math.min(startAt + 50, LONG_BOARD); index += 1) {
-        values.push({ id: 1000 + index, name: `冲刺${String(index)}`, state: 'closed' })
-      }
-      return block({ data: { maxResults: 50, startAt, total: LONG_BOARD, isLast: startAt + values.length >= LONG_BOARD, values } })
+    if (rawName === 'getJiraBoardSprintData') {
+      this.calls.push(args)
+      return block(SPRINTS_BY_BOARD[63])
     }
     return block('{}')
   },
 }
-const paged = await new JiraBoard(pagingBridge).sprints('RD003', 5000)
-check('pages through a long board', paged.length === LONG_BOARD, `${String(paged.length)} of ${String(LONG_BOARD)}`)
-check('asks each page once', pagedCalls.length === 5, JSON.stringify(pagedCalls))
-check('walks the pages in order', pagedCalls.join(',') === '0,50,100,150,200', pagedCalls.join(','))
-check('keeps every page distinct', new Set(paged.map((sprint) => sprint.id)).size === LONG_BOARD)
+const single = await new JiraBoard(singleBridge)
+const singleSprints = await single.sprints('RD003', 5000)
+check('reads a project whose board is unambiguous', singleSprints.length === 4, String(singleSprints.length))
+check(
+  'sends includeIssues:false, which is what keeps the call to metadata',
+  singleBridge.calls[0]?.includeIssues === false,
+  JSON.stringify(singleBridge.calls[0]),
+)
+check(
+  'sends the project key, not a board id, on the first attempt',
+  singleBridge.calls[0]?.projectKeyOrId === 'RD003' && singleBridge.calls[0]?.boardId === undefined,
+  JSON.stringify(singleBridge.calls[0]),
+)
+
+// A kanban board genuinely holds no sprints. The server says so with a 400 and
+// a message, so the row renders empty instead of an error the user cannot act on.
+const kanbanBridge = {
+  rawNameMatching: bridge.rawNameMatching,
+  async callTool(rawName) {
+    if (rawName === 'getAccessibleAtlassianResources') return block(RESOURCES)
+    if (rawName === 'getJiraBoardSprintData') {
+      throw new Error('Failed to fetch board sprints: 400 {"errorMessages":["此面板不支持冲刺"]}')
+    }
+    return block('{}')
+  },
+}
+check(
+  'a kanban board yields an empty catalogue, not an error',
+  (await new JiraBoard(kanbanBridge).sprints('PICDLY', 5000)).length === 0,
+)
+
+// A missing tool is a deployment problem and must stay visible: swallowing it
+// into "no sprints" would look like an empty project.
+const missingToolBridge = {
+  rawNameMatching() {
+    return undefined
+  },
+  async callTool() {
+    return block('{}')
+  },
+  snapshot() {
+    return { status: 'ready' }
+  },
+}
+let missingCode
+try {
+  await new JiraBoard(missingToolBridge).sprints('RD003', 5000)
+} catch (error) {
+  missingCode = error.code ?? error.name
+}
+check('a missing sprint tool is reported, not swallowed', missingCode === 'missing-tool', String(missingCode))
+
+// No project means nothing to list, and the endpoint is asked with one always.
+check('an empty project lists nothing', (await new JiraBoard(catalogueBridge).sprints('   ', 5000)).length === 0)
 
 // The unconstrained-JQL fallback: Atlassian refuses a bare `order by`, and the
 // board must retry with a bounded query rather than surface that as an error.
