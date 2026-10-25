@@ -74,8 +74,16 @@ export interface BridgeOptions {
   store: SessionStore
 }
 
-/** Coarse connection state, as the Settings page shows it. */
-export type BridgeStatus = 'idle' | 'connecting' | 'authorizing' | 'ready' | 'error'
+/**
+ * Coarse connection state, as the Settings page shows it.
+ *
+ * `disconnected` is deliberately distinct from `idle`: both mean "no live MCP
+ * session and no registered tools", but only `idle` means "there is no
+ * authorization at all". `disconnected` says the user switched the bridge off
+ * while keeping the stored credentials, so the next connect is a silent
+ * reconnect rather than another browser round-trip.
+ */
+export type BridgeStatus = 'idle' | 'connecting' | 'authorizing' | 'ready' | 'disconnected' | 'error'
 
 /** A point-in-time view for the Settings page and the log. */
 export interface BridgeSnapshot {
@@ -86,6 +94,14 @@ export interface BridgeSnapshot {
   site: string | undefined
   /** `true` when `site` contradicts the configured `expectedSite`. */
   siteMismatch: boolean
+  /**
+   * `true` when a stored authorization exists.
+   *
+   * What tells the Settings page whether the next connect can be silent: with
+   * credentials on disk, `connect` re-opens the MCP sessions and re-registers
+   * the tools without a browser round-trip.
+   */
+  authorized: boolean
   /** Number of tools currently registered from this server. */
   toolCount: number
   error: string | undefined
@@ -352,6 +368,14 @@ export class AtlassianBridge {
   #testing: Promise<ConnectionTest> | undefined
   #disposed = false
   #waiters: Waiter[] = []
+  /**
+   * Bumped by every suspension.
+   *
+   * A run in flight checks it at each step and bails out silently, so a
+   * disconnect that lands mid-connect can never be overwritten by the run it
+   * interrupted — and can never leave tools registered behind it.
+   */
+  #epoch = 0
 
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
@@ -426,7 +450,14 @@ export class AtlassianBridge {
   ): Promise<readonly unknown[]> {
     const session = this.#board ?? this.#model
     if (session === undefined || this.#status !== 'ready') {
-      throw new Error('未连接 Atlassian — 请先到 设置 → Atlassian 完成连接')
+      // A suspended bridge keeps its authorization, so the recovery is a click on
+      // 重新连接 — not another browser round-trip. Saying "connect" would imply
+      // the latter and make a deliberate toggle look like a broken login.
+      throw new Error(
+        this.#status === 'disconnected'
+          ? 'Atlassian 已断开 — 到 设置 → Atlassian 点「重新连接」即可恢复（不需要再次授权）'
+          : '未连接 Atlassian — 请先到 设置 → Atlassian 完成连接',
+      )
     }
     const result = (await session.client.callTool({ name: rawName, arguments: args }, undefined, {
       timeout: timeoutMs ?? this.#options.toolCallTimeoutMs,
@@ -598,6 +629,7 @@ export class AtlassianBridge {
       site,
       siteMismatch:
         expected !== '' && site !== undefined && !site.toLowerCase().endsWith(expected.replace(/^https?:\/\//, '')),
+      authorized: this.#options.store.current.tokens !== undefined,
       toolCount: this.#disposers.size,
       error: this.#error,
     }
@@ -619,20 +651,32 @@ export class AtlassianBridge {
     await this.#options.store.load()
     await this.#callback.listen(this.#options.redirectPort)
     await this.#reconcileRedirectUri()
-    this.#running = this.#run(false)
+    // A suspension outlives the process on purpose: the user switched these
+    // tools off, so activation must not put them back. `connect` clears the flag.
+    if (this.#options.store.current.suspended === true) {
+      this.#status = this.#options.store.current.tokens === undefined ? 'idle' : 'disconnected'
+      this.#notify()
+      return
+    }
+    this.#epoch += 1
+    const epoch = this.#epoch
+    this.#running = this.#run(false, epoch)
       .catch((error: unknown) => {
-        this.#fail(error)
+        this.#fail(error, epoch)
       })
       .finally(() => {
-        this.#running = undefined
+        if (this.#epoch === epoch) this.#running = undefined
         this.#notify()
       })
     await this.#waitUntil(() => this.#status !== 'connecting', 15_000)
   }
 
   /**
-   * User-triggered connect. Idempotent while a flow is already in flight, so a
-   * double click cannot start two authorizations.
+   * User-triggered connect, which doubles as "resume" after a suspension.
+   *
+   * Idempotent while a flow is already in flight, so a double click cannot start
+   * two authorizations. A suspended bridge is resumed here: the stored tokens
+   * are reused, so no browser is involved unless the server refuses them.
    */
   async authorize(): Promise<BridgeSnapshot> {
     if (this.#disposed) return this.snapshot()
@@ -647,12 +691,19 @@ export class AtlassianBridge {
     if (this.#running === undefined) {
       this.#error = undefined
       this.#authorizationUrl = undefined
-      this.#running = this.#run(true)
+      // The suspension is lifted before the run starts, so a crash mid-connect
+      // leaves "wants to be connected" rather than a half-applied state.
+      if (this.#options.store.current.suspended === true) {
+        await this.#options.store.clear('suspended')
+      }
+      this.#epoch += 1
+      const epoch = this.#epoch
+      this.#running = this.#run(true, epoch)
         .catch((error: unknown) => {
-          this.#fail(error)
+          this.#fail(error, epoch)
         })
         .finally(() => {
-          this.#running = undefined
+          if (this.#epoch === epoch) this.#running = undefined
           this.#notify()
         })
     }
@@ -662,8 +713,45 @@ export class AtlassianBridge {
     return this.snapshot()
   }
 
-  /** Forget the tokens and drop every bridged tool. */
+  /**
+   * Suspend the bridge: close both sessions and unregister every tool, but keep
+   * the stored authorization.
+   *
+   * This is what the Settings page's 断开连接 button does. Signing the user out
+   * is deliberately NOT its job: a suspended bridge has to be resumable without
+   * a browser round-trip, so the tokens, the client registration and the site
+   * all survive. The flag is persisted, so a harness restart does not silently
+   * re-register the tools the user just switched off. {@link forget} is the
+   * destructive counterpart.
+   */
   async disconnect(): Promise<BridgeSnapshot> {
+    // Bumping the epoch first is what makes this authoritative: a run that is
+    // mid-connect when the click lands sees the change and bails out instead of
+    // re-registering tools behind the suspension.
+    this.#epoch += 1
+    this.#running = undefined
+    this.#callback.cancelWait()
+    await this.#teardownClient()
+    this.#clearTools()
+    this.#authorizationUrl = undefined
+    this.#error = undefined
+    await this.#options.store.patch({ suspended: true })
+    this.#status = this.#options.store.current.tokens === undefined ? 'idle' : 'disconnected'
+    this.#notify()
+    return this.snapshot()
+  }
+
+  /**
+   * Sign out: drop the tools, the sessions, and the stored authorization.
+   *
+   * Kept separate from {@link disconnect} because the two mean different things
+   * to the user — "switch the tools off for now" versus "forget this account".
+   * Only this one forces a new browser authorization.
+   */
+  async forget(): Promise<BridgeSnapshot> {
+    this.#epoch += 1
+    this.#running = undefined
+    this.#callback.cancelWait()
     await this.#teardownClient()
     this.#clearTools()
     this.#authorizationUrl = undefined
@@ -678,6 +766,8 @@ export class AtlassianBridge {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
+    this.#epoch += 1
+    this.#running = undefined
     this.#callback.cancelWait()
     await this.#teardownClient()
     this.#clearTools()
@@ -705,8 +795,9 @@ export class AtlassianBridge {
    * authorization both of them use is resolved by the model connection first.
    * Its failure is not fatal: a broken panel must not cost the agent its tools.
    */
-  async #run(openBrowser: boolean): Promise<void> {
+  async #run(openBrowser: boolean, epoch: number): Promise<void> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (this.#epoch !== epoch) return
       this.#status = 'connecting'
       this.#error = undefined
       this.#notify()
@@ -715,13 +806,29 @@ export class AtlassianBridge {
         this.#status = 'authorizing'
         this.#notify()
       })
+      // The click that suspended the bridge may have landed while the browser
+      // flow was open. Registering the tools here would resurrect exactly what
+      // the user switched off, so the new client is dropped instead.
+      if (this.#epoch !== epoch) {
+        if (client !== undefined) await client.close().catch(() => undefined)
+        return
+      }
       if (client === undefined) continue
 
       this.#model = { client, raw: new Map() }
       // Before `#syncTools`: the board session is what the tool catalogue is
       // enumerated from, so it has to exist first.
       await this.#connectBoard()
+      if (this.#epoch !== epoch) {
+        await this.#teardownClient()
+        return
+      }
       await this.#syncTools(this.#model)
+      if (this.#epoch !== epoch) {
+        await this.#teardownClient()
+        this.#clearTools()
+        return
+      }
       await this.#detectSite(this.#model)
       this.#authorizationUrl = undefined
       this.#status = 'ready'
@@ -1022,7 +1129,15 @@ export class AtlassianBridge {
     }
   }
 
-  #fail(error: unknown): void {
+  /**
+   * Record a failed run.
+   *
+   * A failure from a superseded run is discarded: the user already suspended or
+   * replaced that attempt, and surfacing its error would paint a red banner over
+   * a state they deliberately chose.
+   */
+  #fail(error: unknown, epoch: number): void {
+    if (this.#epoch !== epoch) return
     this.#error = error instanceof Error ? error.message : String(error)
     this.#status = 'error'
     this.#host.logger.error(`atlassian: ${this.#error}`)

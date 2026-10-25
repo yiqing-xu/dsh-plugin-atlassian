@@ -279,6 +279,27 @@ check('renders the server description', /tool\.description/.test(code))
 check('filters by name and description', /tool\.rawName/.test(code))
 
 // ---------------------------------------------------------------------------
+// 断开连接 vs 退出登录
+// ---------------------------------------------------------------------------
+//
+// The two buttons mean different things and must stay different: 断开连接 takes
+// the tools out of the agent's context while keeping the authorization, so a
+// reconnect is silent; 退出登录 is the destructive one. A regression that merged
+// them would either sign the user out on a mere toggle or leave the tools
+// registered after they switched them off.
+
+console.log('\n断开连接 vs 退出登录')
+check('offers a separate sign-out action', /act\('forget'\)/.test(code))
+check('disconnect does not promise a sign-out', /act\('disconnect'\)/.test(code))
+check('names the resume state in the connect button', /status === 'disconnected' \? '重新连接'/.test(code))
+check('renders the suspended status', /disconnected: '已断开'/.test(code))
+check('only offers sign-out with a stored authorization', /authorized === true/.test(code))
+check('keeps the suspend button off in the suspended state', /status !== 'idle' && status !== 'disconnected'/.test(code))
+check('tells the suspended board how to resume', /不需要再次授权/.test(code))
+check('explains the suspended state in Settings', /已断开（授权保留）/.test(code))
+check('drops a stale board when suspended', /status\.status === 'idle' \|\| status\.status === 'disconnected'/.test(code))
+
+// ---------------------------------------------------------------------------
 // Board memory between openings
 // ---------------------------------------------------------------------------
 //

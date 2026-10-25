@@ -25,6 +25,14 @@ export interface StoredSession {
   codeVerifier?: string
   /** Site the user actually authorized, once known. */
   site?: string
+  /**
+   * The user switched the bridge off, keeping the authorization.
+   *
+   * Persisted so a restart does not quietly re-register the tools they just
+   * suspended. Cleared by the next successful connect, never by a token
+   * refresh — this is a UI decision, not a credential state.
+   */
+  suspended?: boolean
 }
 
 /**

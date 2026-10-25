@@ -184,7 +184,7 @@ if (typeof document !== 'undefined') {
 // Wire types (a structural mirror of the host half)
 // ---------------------------------------------------------------------------
 
-type Status = 'idle' | 'connecting' | 'authorizing' | 'ready' | 'error'
+type Status = 'idle' | 'connecting' | 'authorizing' | 'ready' | 'disconnected' | 'error'
 
 interface StatusPayload {
   ok: boolean
@@ -192,6 +192,14 @@ interface StatusPayload {
   authorizationUrl?: string
   site?: string
   siteMismatch: boolean
+  /**
+   * `true` when a stored authorization exists, so a reconnect needs no browser.
+   *
+   * Optional on the wire: during an HMR reload the bundle and the host can be a
+   * version apart for a moment, and a missing flag must read as "unknown"
+   * rather than being taken for a live authorization.
+   */
+  authorized?: boolean
   toolCount: number
   error?: string
   board: { jql: string; limit: number; promptTemplate: string }
@@ -530,6 +538,9 @@ const STATUS_TEXT: Record<Status, string> = {
   // turns out to need authorization, and no tab has been opened at that point.
   authorizing: '需要授权',
   ready: '已连接',
+  // Switched off by the user, credentials still on disk: the distinction the
+  // whole button depends on, because it says a reconnect needs no browser.
+  disconnected: '已断开',
   error: '出错',
 }
 
@@ -1467,7 +1478,7 @@ function AtlassianSettings(): React.ReactElement {
   }, [toolsOpen, tools, toolsLoading, loadTools])
 
   const act = React.useCallback(
-    async (action: 'connect' | 'disconnect'): Promise<void> => {
+    async (action: 'connect' | 'disconnect' | 'forget'): Promise<void> => {
       setBusy(true)
       // A verdict about the previous connection would outlive the connection it
       // described; clear it before changing that connection. The tool catalogue
@@ -1550,6 +1561,16 @@ function AtlassianSettings(): React.ReactElement {
   const authorizationUrl = payload?.authorizationUrl
   const error = transportError ?? payload?.error
   const toolCount = payload?.toolCount ?? 0
+  /**
+   * Whether 断开连接 has anything to act on.
+   *
+   * `idle` means there is no authorization at all, and `disconnected` means the
+   * user already switched it off — offering the button in either state would
+   * promise a change that cannot happen. Every other state is suspendable, a
+   * stuck authorization and a broken session included: those are exactly when
+   * the button gets clicked.
+   */
+  const suspendable = status !== 'idle' && status !== 'disconnected'
 
   const filteredTools = React.useMemo(() => {
     const list = tools ?? []
@@ -1641,6 +1662,22 @@ function AtlassianSettings(): React.ReactElement {
               ),
         )
       : null,
+    status === 'disconnected'
+      ? LI(
+          'div',
+          { key: 'suspended', style: box },
+          LI(
+            'div',
+            { key: 'title', style: { fontSize: '0.9em', fontWeight: 600, marginBottom: 4 } },
+            '已断开（授权保留）',
+          ),
+          LI(
+            'div',
+            { key: 'body', style: { fontSize: '0.85em', lineHeight: 1.6, opacity: 0.85 } },
+            '这一代工具已经从 agent 的工具列表里撤下，占用的上下文也随之释放；Atlassian 的授权仍在本地。点上面的「重新连接」即可恢复，不需要再次授权。要彻底清除授权，用「退出登录」。',
+          ),
+        )
+      : null,
     error !== undefined
       ? LI(
           'div',
@@ -1663,7 +1700,7 @@ function AtlassianSettings(): React.ReactElement {
             void act('connect')
           },
         },
-        status === 'authorizing' ? '打开授权页' : '连接 Atlassian',
+        status === 'authorizing' ? '打开授权页' : status === 'disconnected' ? '重新连接' : '连接 Atlassian',
       ),
       LI(
         'button',
@@ -1687,14 +1724,41 @@ function AtlassianSettings(): React.ReactElement {
         {
           key: 'disconnect',
           type: 'button',
-          style: { ...button, opacity: busy || testing || status === 'idle' ? 0.5 : 1 },
-          disabled: busy || testing || status === 'idle',
+          // The distinction this button now carries: the tools leave the
+          // agent's context, the authorization stays. Saying so up front is
+          // what stops it reading like a sign-out.
+          title:
+            status === 'ready'
+              ? '断开后 agent 工具会从上下文移除，但授权保留；重新连接无需再次授权'
+              : '当前没有可断开的连接',
+          // Also enabled mid-flow and on `error`: a stalled authorization or a
+          // broken session is exactly when the user reaches for this button.
+          style: { ...button, opacity: busy || testing || suspendable ? 1 : 0.5 },
+          disabled: busy || testing || !suspendable,
           onClick: () => {
             void act('disconnect')
           },
         },
         '断开连接',
       ),
+      // Sign-out is a different decision, so it is a different button: only
+      // shown when there is a stored authorization for it to discard.
+      payload?.authorized === true
+        ? LI(
+            'button',
+            {
+              key: 'forget',
+              type: 'button',
+              title: '清除本地授权与令牌，下次连接需要重新在浏览器里授权',
+              style: { ...button, opacity: busy || testing ? 0.5 : 1 },
+              disabled: busy || testing,
+              onClick: () => {
+                void act('forget')
+              },
+            },
+            '退出登录',
+          )
+        : null,
     ),
     test === undefined
       ? null
@@ -4191,14 +4255,15 @@ function JiraBoardPanel(): React.ReactElement {
   }, [configJql, hostReady])
 
   // A board painted from the snapshot must not outlive the account it came
-  // from: `idle` means there is no account at all, and a different or
-  // mismatched site is a board belonging to somebody else's Jira. Either way
-  // the panel returns to the connect prompt instead of vouching for numbers it
-  // cannot stand behind. Transitional and `error` states keep their board — the
-  // badge is the honest signal there, and wiping would also lose a usable view.
+  // from: `idle` means there is no account at all, `disconnected` means the user
+  // switched the bridge off, and a different or mismatched site is a board
+  // belonging to somebody else's Jira. Each returns the panel to the connect
+  // prompt instead of vouching for numbers it cannot stand behind. Transitional
+  // and `error` states keep their board — the badge is the honest signal there,
+  // and wiping would also lose a usable view.
   React.useEffect(() => {
     if (status === undefined || board === undefined) return
-    const signedOut = status.status === 'idle'
+    const signedOut = status.status === 'idle' || status.status === 'disconnected'
     const otherSite =
       status.siteMismatch || (status.site !== undefined && board.site !== undefined && status.site !== board.site)
     if (!signedOut && !otherSite) return
@@ -4624,10 +4689,13 @@ function JiraBoardPanel(): React.ReactElement {
 
   const body: React.ReactNode = (() => {
     if (!connected && board === undefined) {
+      const suspended = status?.status === 'disconnected'
       return LI(
         'div',
         { key: 'offline', style: { ...box, margin: 0, maxWidth: 460 } },
-        '还没有连接到 Atlassian。到 设置 → Atlassian 点「连接 Atlassian」，授权后这块看板会自动出现内容。',
+        suspended
+          ? 'Atlassian 已断开：agent 的工具已从上下文移除。到 设置 → Atlassian 点「重新连接」即可恢复，不需要再次授权。'
+          : '还没有连接到 Atlassian。到 设置 → Atlassian 点「连接 Atlassian」，授权后这块看板会自动出现内容。',
       )
     }
     // A transient failure must not throw away a board that is still on screen:

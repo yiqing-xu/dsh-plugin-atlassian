@@ -107,6 +107,7 @@ function requireString(input: Record<string, unknown>, field: string): string {
  *
  * Path shapes:
  * - `GET  /status`, `POST /connect`, `POST /disconnect` — the Settings page.
+ * - `POST /forget` — sign out: drop the stored authorization, not just the tools.
  * - `POST /test` — probe whether the current token is still accepted.
  * - `GET  /tools` — every registered tool with its server-supplied description.
  * - `GET  /prefs`, `POST /prefs` — the UI preferences document.
@@ -166,7 +167,14 @@ export function registerRoutes(
           return
         }
         if (action === 'disconnect' && method === 'POST') {
+          // Suspends, does not sign out: the tools leave the model's context and
+          // the stored authorization stays, so a later `connect` is silent.
           const snapshot = await bridge.disconnect()
+          sendJson(res, 200, { ...snapshot, ok: true })
+          return
+        }
+        if (action === 'forget' && method === 'POST') {
+          const snapshot = await bridge.forget()
           sendJson(res, 200, { ...snapshot, ok: true })
           return
         }

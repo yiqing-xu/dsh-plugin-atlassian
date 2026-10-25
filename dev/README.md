@@ -92,7 +92,18 @@ curl http://127.0.0.1:43199/plugins/atlassian/tools
 curl http://127.0.0.1:43199/plugins/atlassian/prefs
 curl -X POST -H "content-type: application/json" -d '{"panelVisible":false}' http://127.0.0.1:43199/plugins/atlassian/prefs
 curl -X POST http://127.0.0.1:43199/plugins/atlassian/disconnect
+curl -X POST http://127.0.0.1:43199/plugins/atlassian/forget
 ```
+
+`/disconnect` 是**暂停**而不是退出登录：它关掉两条 MCP 会话、注销这一代工具，状态变成
+`disconnected`，但授权文件（token、client 注册、站点）原样保留，并在授权文件里写一个
+`suspended: true`，所以重启进程也不会把工具装回去。再 POST `/connect` 就会用存下的令牌重建连接并
+重新注册工具，**不会再开浏览器**。
+
+`/forget` 才是退出登录：清掉授权文件，状态回到 `idle`，下次连接必须重新授权。
+
+设置页的两个按钮就对应这两个端点：「断开连接」调 `/disconnect`，「退出登录」调 `/forget`（只有在
+`status.authorized === true` 时才显示）。`/status` 里的 `authorized` 就是「本地还有没有授权」。
 
 `/tools` 返回当前这一代已注册工具的 `name`、`rawName` 和 MCP 服务器给的 `description`；设置页
 「工具清单」就是按需读这个端点，不占用每几秒一次的状态轮询。
@@ -140,7 +151,7 @@ PKCE、loopback 回调端口全部就绪——剩下的只有浏览器里点批�
 
 ## 不启动进程的回归脚本
 
-六个 harness 直接跑**编译产物**，不需要授权也不需要浏览器：
+七个 harness 直接跑**编译产物**，不需要授权也不需要浏览器：
 
 ```powershell
 npm run build
@@ -148,12 +159,21 @@ node dev/verify-board.mjs            # lib/board.js：字段映射、JQL 回退�
 node dev/verify-client-bundle.mjs    # lib/client.js：槽位注册契约、侧边栏开关、主题与看板缓存策略
 node dev/verify-token-test.mjs       # lib/bridge.js：测试连接的成功、并发与 token 失效路径
 node dev/verify-catalogue-split.mjs  # lib/bridge.js：模型连接只注册 primary，看板连接能调平铺目录
+node dev/verify-suspend.mjs          # lib/bridge.js：断开只暂停、重连免授权、退出登录才清授权
 node dev/verify-prefs.mjs            # lib/prefs.js：偏好文档与 /prefs 端点
 node dev/verify-direct-search.mjs <临时目录>   # 真 DOM 里挂面板，输入编号/链接并回车
 ```
 
 `verify-catalogue-split.mjs` 起两个假 MCP 服务（`/mcp` 只给 primary，`/mcp?tools=all` 给平铺目录），
 断言模型侧只注册前者、看板仍能按名字调用后者、设置页目录里后者被标成「仅看板」且不重复出现。
+
+`verify-suspend.mjs` 起一个假 MCP 服务并预置一份授权，然后断言：`disconnect` 之后状态是
+`disconnected`、注册表真空、token 与站点还在、`suspended` 落了盘；`authorize` 之后工具全回来且
+日志里**没有** `authorization required`；换一个 bridge 实例启动（模拟重启）仍然是 `disconnected`
+且不注册任何工具；只有 `forget` 会清掉 token、client 注册与 `suspended`。它同时覆盖
+`POST /disconnect`、`POST /forget` 与 `/status` 的 `authorized` 字段。脚本会先占一个临时端口再释放，
+让两个 bridge 绑定**同一个**回调端口——换端口会让 `#reconcileRedirectUri` 主动丢掉 token，那样就
+没东西可恢复了（生产里 `redirectPort` 是钉死的，正是这个原因）。
 
 `verify-direct-search.mjs` 用 `react-dom` + `jsdom` 真正**挂载看板面板**，然后往搜索框里输入
 编号和 Jira 链接、按回车、按 Escape——这是唯一能在没有授权的情况下覆盖「用户到底怎么用这个
@@ -304,5 +324,9 @@ Remove-Item "$env:USERPROFILE\.dsh\.dsh-atlassian\atlassian-dev-*.json"
 
 UI 偏好不在这个文件里：`/prefs` 写的是 `.dsh-atlassian/<serverName>-prefs.json`。删掉它只会把
 「侧边栏入口」恢复成显示，不碰授权；反过来 `disconnect` 也不会把用户关掉的开关重新打开。
+
+会话文件里除了 `tokens` / `clientInformation` / `site`，还有一个 `suspended`：`/disconnect` 把它
+写成 `true`，下次成功连接时清掉。它的作用是让「已断开」跨进程存活——重启 Harness 不会把用户刚
+撤下的工具重新注册回来。想手工恢复连接，删掉这个字段或直接点设置页的「重新连接」都行。
 
 > 别去删 `atlassian-*.json`——那是你日常 profile 的授权。

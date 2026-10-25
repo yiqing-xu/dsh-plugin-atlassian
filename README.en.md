@@ -83,8 +83,14 @@ add under `allowBuilds` in that profile's `pnpm-workspace.yaml`.)
 
 The settings page at the top of this README is that connected state: the site row shows whichever site
 you authorized, and the tool count depends on the products that site exposes. If the authorization
-page does not open by itself, Settings shows a clickable authorization link. If the flow gets stuck,
-click **Disconnect** and reconnect.
+page does not open by itself, Settings shows a clickable authorization link.
+
+**Disconnect** is not a sign-out: it only withdraws this generation of tools from the agent's tool list
+(the status becomes **Disconnected**) and leaves the authorization on disk. Clicking **Reconnect**
+afterwards rebuilds both MCP sessions from the stored tokens and re-registers the tools, with **no
+second browser round-trip**. Signing out is the separate **Sign out** button beside it — that is the one
+that clears the local authorization and tokens, so the next connect has to authorize again. The
+disconnected state is persisted: restarting the harness does not quietly put the tools back.
 
 The tool catalogue loads on demand, so it never slows the status poll that runs every few seconds.
 The names are the same ones the agent sees (`mcp__atlassian__...`), and the descriptions are passed
@@ -295,8 +301,10 @@ Look for warnings prefixed with `atlassian:` in the startup log.
 <summary>Stuck at "Authorization required" / the browser never opened</summary>
 
 Use the authorization link shown in Settings. If `redirectPort` is taken, the plugin falls back to
-a temporary port and re-registers automatically. If the flow is truly stuck, click **Disconnect**
-to clear the token and reconnect. If the authorization page explicitly rejects the redirect, a site
+a temporary port and re-registers automatically. If the flow is truly stuck, click **Disconnect** to
+abort that attempt and then **Connect Atlassian** to start over; if the stored authorization itself is
+broken (for example a changed `redirectPort` invalidated the client registration), click **Sign out**
+to clear it and connect afresh. If the authorization page explicitly rejects the redirect, a site
 admin must allowlist `http://127.0.0.1:<redirectPort>/callback` in Atlassian's domain settings (v2
 may enforce a redirect allowlist).
 </details>

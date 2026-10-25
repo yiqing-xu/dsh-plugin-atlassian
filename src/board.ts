@@ -655,9 +655,15 @@ export class JiraBoard {
       // permission problem instead of connecting.
       const health = this.#bridge.snapshot?.()
       if (health !== undefined && health.status !== 'ready') {
+        // A suspended bridge is not a broken one: the user switched it off, and
+        // telling them to "connect" would send them looking for an authorization
+        // problem that does not exist. Saying how to resume is the whole answer.
         throw new BoardError(
           'not-connected',
-          health.error ?? `Atlassian 连接尚未就绪（状态：${health.status}）— 到 设置 → Atlassian 完成连接`,
+          health.error ??
+            (health.status === 'disconnected'
+              ? 'Atlassian 已断开 — 到 设置 → Atlassian 点「重新连接」即可恢复（不需要再次授权）'
+              : `Atlassian 连接尚未就绪（状态：${health.status}）— 到 设置 → Atlassian 完成连接`),
         )
       }
       throw new BoardError(
